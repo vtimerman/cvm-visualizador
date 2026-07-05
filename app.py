@@ -103,6 +103,14 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
+def _sugere(lista, q, n=8):
+    """Itens da lista que contêm todas as palavras digitadas (para sugerir)."""
+    ws = [w for w in str(q).replace('"', " ").replace(",", " ").lower().split() if w]
+    if not ws:
+        return []
+    return [x for x in lista if all(w in x.lower() for w in ws)][:n]
+
+
 def parse_busca(q):
     """Interpreta a consulta.
     - vírgula separa alternativas (OU)
@@ -282,10 +290,22 @@ def main():
             ate = st.date_input("Até (data final)", value=None,
                                 min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
 
+        sugerir = st.checkbox(
+            "💡 Autocomplete (sugerir da base)", value=False,
+            help="Mostra nomes/assuntos da base que combinam. As sugestões só entram "
+                 "se você CLICAR — você sempre pode digitar um texto livre.")
+        nomes_idx = assuntos_idx = []
+        if sugerir:
+            nomes_idx, assuntos_idx = indices()
+
         assunto_q = st.text_input(
-            "Assunto",
-            help='Palavras juntas = E (todas no campo). "aspas" = frase exata. '
-                 'Vírgula = OU. Ex.: processo fundo')
+            "Assunto", key="q_assunto",
+            help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+        if sugerir and assunto_q.strip():
+            for s in _sugere(assuntos_idx, assunto_q):
+                st.button("↳ " + (s[:55] + "…" if len(s) > 56 else s),
+                          key="sa_" + s, use_container_width=True,
+                          on_click=lambda v=s: st.session_state.update(q_assunto=v))
 
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
         status_sel = st.multiselect("Status", status_disp,
@@ -302,9 +322,14 @@ def main():
                                       "como diretor.", format_func=rot)
 
         pessoa_q = st.text_input(
-            "Pessoa (nome)",
+            "Pessoa (nome)", key="q_pessoa",
             help='Ex.: felipe claudino → tem as duas palavras. "felipe claudino" = '
                  'exato. Vírgula = OU (ex.: vorcaro, machado).')
+        if sugerir and pessoa_q.strip():
+            for s in _sugere(nomes_idx, pessoa_q):
+                st.button("↳ " + (s[:55] + "…" if len(s) > 56 else s),
+                          key="sp_" + s, use_container_width=True,
+                          on_click=lambda v=s: st.session_state.update(q_pessoa=v))
 
         st.divider()
         st.caption("Dica: clique no cabeçalho de uma coluna (Nº, Data…) para ordenar. "
