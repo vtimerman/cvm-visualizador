@@ -21,6 +21,7 @@ import re
 import time
 import html
 import sqlite3
+import unicodedata
 import datetime as dt
 
 import requests
@@ -216,6 +217,12 @@ def cmd_backfill(ini=1, fim=None):
     print(f"[backfill] concluido ({feitos} ids novos).")
 
 
+def _ascii(texto):
+    """CallMeBot rejeita acentos/emoji — transliteramos para ASCII simples."""
+    t = unicodedata.normalize("NFKD", str(texto))
+    return t.encode("ascii", "ignore").decode("ascii")
+
+
 def notificar_whatsapp(texto):
     """Envia um WhatsApp via CallMeBot, se as credenciais estiverem no ambiente."""
     phone = os.environ.get("WHATSAPP_PHONE", "")
@@ -224,7 +231,7 @@ def notificar_whatsapp(texto):
         return
     try:
         requests.get("https://api.callmebot.com/whatsapp.php",
-                     params={"phone": phone, "text": texto, "apikey": apikey},
+                     params={"phone": phone, "text": _ascii(texto), "apikey": apikey},
                      timeout=30)
     except Exception as e:
         print(f"  ! falha ao notificar WhatsApp: {e}", file=sys.stderr)
@@ -258,8 +265,8 @@ def cmd_atualizar():
         for nid in novos:
             r = con.execute("SELECT data, hora, componente, assunto FROM audiencias "
                             "WHERE id=?", (nid,)).fetchone()
-            msg = (f"🔔 Nova audiência CVM nº {nid}\n"
-                   f"{r[0]} {r[1]} — {r[2]}\n"
+            msg = (f"Nova audiencia CVM no {nid}\n"
+                   f"{r[0]} {r[1]} - {r[2]}\n"
                    f"Assunto: {r[3]}\n{BASE}{nid}")
             notificar_whatsapp(msg)
     elif len(novos) > limite:

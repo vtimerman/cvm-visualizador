@@ -55,7 +55,7 @@ jobs:
           curl -s -G "https://api.callmebot.com/whatsapp.php" \
             --data-urlencode "phone=${{ secrets.WHATSAPP_PHONE }}" \
             --data-urlencode "apikey=${{ secrets.CALLMEBOT_APIKEY }}" \
-            --data-urlencode "text=⚠️ Falha na coleta de Audiências CVM. Veja: https://github.com/vtimerman/cvm-visualizador/actions" || true
+            --data-urlencode "text=Falha na coleta de Audiencias CVM. Veja: https://github.com/vtimerman/cvm-visualizador/actions" || true
 
       - name: Publicar base atualizada
         run: |
