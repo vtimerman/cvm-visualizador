@@ -2,7 +2,7 @@ name: Coleta CVM
 
 on:
   schedule:
-    - cron: "*/30 * * * *"      # a cada 30 minutos
+    - cron: "0 * * * *"         # a cada 1 hora (limite do plano grátis em repo privado)
   workflow_dispatch:            # permite rodar manualmente (inclusive backfill)
     inputs:
       modo:
