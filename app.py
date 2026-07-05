@@ -8,7 +8,6 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_searchbox import st_searchbox
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
@@ -70,23 +69,6 @@ def indices():
     return nomes, assuntos
 
 
-def _sugestoes(lista, q):
-    """Opções para o searchbox: 1ª = 'tudo que contém', demais = itens exatos."""
-    if not q or len(q.strip()) < 2:
-        return []
-    ql = q.strip().lower()
-    hits = [x for x in lista if ql in x.lower()][:40]
-    return [(f'🔍 tudo que contém "{q.strip()}"', "~" + q.strip())] + [(x, x) for x in hits]
-
-
-def busca_nome(q):
-    return _sugestoes(indices()[0], q)
-
-
-def busca_assunto(q):
-    return _sugestoes(indices()[1], q)
-
-
 # Onde a pessoa pode aparecer:
 #  part = participante externo (solicitante + acompanhantes)
 #  dir  = diretor/órgão da CVM que recebeu (campo "componente")
@@ -121,14 +103,18 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
-def filtrar(df, de, ate, assunto, siglas, excluir_siglas, termos, status_sel):
+def filtrar(df, de, ate, assunto_termos, siglas, excluir_siglas, termos, status_sel):
     m = pd.Series(True, index=df.index)
     if de:
         m &= df["data_dt"] >= pd.Timestamp(de)
     if ate:
         m &= df["data_dt"] <= pd.Timestamp(ate)
-    if assunto:
-        m &= df["assunto"].str.contains(assunto, case=False, na=False)
+    if assunto_termos:
+        col = df["assunto"].fillna("").str.lower()
+        ma = pd.Series(False, index=df.index)
+        for a in assunto_termos:
+            ma |= col.str.contains(re.escape(str(a).lower()), na=False)
+        m &= ma
     if siglas:
         m &= df["sigla"].isin(siglas)
     if excluir_siglas:
@@ -258,12 +244,10 @@ def main():
             ate = st.date_input("Até (data final)", value=None,
                                 min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
 
-        st.markdown("**Assunto** (autocompleta da base)")
-        sel_assunto = st_searchbox(busca_assunto, key="sb_assunto",
-                                   placeholder="digite parte do assunto…")
-        assunto = ""
-        if sel_assunto:
-            assunto = str(sel_assunto)[1:] if str(sel_assunto).startswith("~") else str(sel_assunto)
+        nomes_idx, assuntos_idx = indices()
+        assunto_termos = st.multiselect(
+            "Assunto (um ou vários)", assuntos_idx,
+            help="Digite para filtrar e escolha um ou mais assuntos. Combina em OU.")
 
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
         status_sel = st.multiselect("Status", status_disp,
@@ -279,18 +263,15 @@ def main():
                                       "machado' e excluir 'DHM' tira as que ele conduziu "
                                       "como diretor.", format_func=rot)
 
-        st.markdown("**Pessoa** (autocompleta da base)")
-        sel_pessoa = st_searchbox(busca_nome, key="sb_pessoa",
-                                  placeholder="digite parte do nome…")
-        termos = []
-        if sel_pessoa:
-            termos = [str(sel_pessoa)[1:] if str(sel_pessoa).startswith("~") else str(sel_pessoa)]
+        termos = st.multiselect(
+            "Pessoa (um ou vários nomes)", nomes_idx,
+            help="Solicitante, acompanhante ou diretor. Escolha vários — combina em OU.")
 
         st.divider()
         st.caption("Dica: clique no cabeçalho de uma coluna (Nº, Data…) para ordenar. "
-                   "Assunto e Pessoa completam conforme você digita.")
+                   "Em Assunto e Pessoa, digite para filtrar e escolha vários itens.")
 
-    res = filtrar(df, de, ate, assunto, siglas, excluir, termos, status_sel)
+    res = filtrar(df, de, ate, assunto_termos, siglas, excluir, termos, status_sel)
 
     # ---- métricas ----
     c1, c2 = st.columns(2)
