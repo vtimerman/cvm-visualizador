@@ -8,6 +8,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_searchbox import st_searchbox
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
@@ -54,6 +55,36 @@ def carregar() -> pd.DataFrame:
     df["sigla"] = df["componente"].fillna("").str.split(" - ").str[0].str.strip()
     df["link"] = URL_BASE + df["id"].astype(str)
     return df
+
+
+@st.cache_data(ttl=300)
+def indices():
+    """Listas distintas de nomes e assuntos, para o autocomplete."""
+    df = carregar()
+    nomes = set(df["solicitante_nome"].dropna())
+    for a in df["acompanhantes"].dropna():
+        nomes |= {x.strip() for x in a.split("|") if x.strip()}
+    nomes |= set(df["componente"].dropna())
+    nomes = sorted(n for n in nomes if n and n.strip())
+    assuntos = sorted(a for a in set(df["assunto"].dropna()) if a and a.strip())
+    return nomes, assuntos
+
+
+def _sugestoes(lista, q):
+    """Opções para o searchbox: 1ª = 'tudo que contém', demais = itens exatos."""
+    if not q or len(q.strip()) < 2:
+        return []
+    ql = q.strip().lower()
+    hits = [x for x in lista if ql in x.lower()][:40]
+    return [(f'🔍 tudo que contém "{q.strip()}"', "~" + q.strip())] + [(x, x) for x in hits]
+
+
+def busca_nome(q):
+    return _sugestoes(indices()[0], q)
+
+
+def busca_assunto(q):
+    return _sugestoes(indices()[1], q)
 
 
 # Onde a pessoa pode aparecer:
@@ -125,17 +156,16 @@ body { margin:0; background:#fff; color:#000; font-family:"Open Sans",Arial,sans
 #width { width:100%; max-width:1024px; margin:0 auto; box-sizing:border-box; }
 h2 { text-align:center; padding:5px; font-family:Arial; font-size:1.3rem; }
 table { border-collapse:collapse; margin:10px 0; width:100%; }
-.acomp { width:502px; float:left; }
-.par { margin-right:20px; }
+.cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 20px; }
+.acomp { width:100%; }
 td { padding:10px; border:1px solid black; vertical-align:top; }
 .header { font-weight:bold; background:#eee; }
 .upperHeader { background:#346DBC; color:white; font-weight:600; }
 """
 
 
-def _card(titulo, nome, empresa, cargo, par):
-    cls = "acomp par" if par else "acomp"
-    return (f'<table class="{cls}">'
+def _card(titulo, nome, empresa, cargo):
+    return (f'<table class="acomp">'
             f'<tr><td colspan="2" class="upperHeader">{titulo}</td></tr>'
             f'<tr><td class="header">Nome</td><td>{nome}</td></tr>'
             f'<tr><td class="header">Empresa</td><td>{empresa}</td></tr>'
@@ -152,10 +182,9 @@ def render_detalhe(row):
     e = _esc
     acs = [a.strip() for a in str(row["acompanhantes"] or "").split(" | ") if a.strip()]
     cards = [_card("SOLICITANTE", e(row["solicitante_nome"]),
-                   e(row.get("solicitante_empresa", "")), e(row.get("solicitante_cargo", "")),
-                   par=True)]
-    for i, a in enumerate(acs):
-        cards.append(_card("ACOMPANHANTE", e(a), "", "", par=(i % 2 == 0)))
+                   e(row.get("solicitante_empresa", "")), e(row.get("solicitante_cargo", "")))]
+    for a in acs:
+        cards.append(_card("ACOMPANHANTE", e(a), "", ""))
 
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
@@ -175,11 +204,11 @@ def render_detalhe(row):
         f'<tr><td class="header">Observações</td><td colspan="5">{e(row["observacoes"])}</td></tr>'
         f'<tr><td class="header">Status:</td><td colspan="5">{e(row["status"])}</td></tr>'
         '</table>'
-        + "".join(cards)
-        + '<div style="clear:both"></div></div></body></html>'
+        + '<div class="cards">' + "".join(cards) + '</div>'
+        + '</div></body></html>'
     )
     n_linhas_cards = (len(cards) + 1) // 2
-    components.html(doc, height=120 + 260 + n_linhas_cards * 205, scrolling=True)
+    components.html(doc, height=110 + 300 + n_linhas_cards * 200, scrolling=True)
 
 
 # --------------------------------------------------------------------------
@@ -205,48 +234,61 @@ def main():
         validas = df.dropna(subset=["data_dt"])
         dmin = validas["data_dt"].min().date() if len(validas) else dt.date(1948, 1, 1)
         dmax = validas["data_dt"].max().date() if len(validas) else dt.date.today()
-        st.caption("Deixe em branco para não limitar aquele lado.")
-        de = st.date_input("De (data inicial)", value=None,
-                           min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-        ate = st.date_input("Até (data final)", value=None,
-                            min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-        assunto = st.text_input("Assunto contém")
+
+        hoje = dt.date.today()
+        atalho = st.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
+                                      "Personalizado"], index=0)
+        de = ate = None
+        if atalho == "Hoje":
+            de = ate = hoje
+        elif atalho == "Esta semana":
+            de = hoje - dt.timedelta(days=hoje.weekday())
+            ate = de + dt.timedelta(days=6)
+        elif atalho == "Este mês":
+            de = hoje.replace(day=1)
+            ate = (de + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+        elif atalho == "Personalizado":
+            de = st.date_input("De (data inicial)", value=None,
+                               min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
+            ate = st.date_input("Até (data final)", value=None,
+                                min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
+
+        st.markdown("**Assunto** (autocompleta da base)")
+        sel_assunto = st_searchbox(busca_assunto, key="sb_assunto",
+                                   placeholder="digite parte do assunto…")
+        assunto = ""
+        if sel_assunto:
+            assunto = str(sel_assunto)[1:] if str(sel_assunto).startswith("~") else str(sel_assunto)
+
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
-        status_sel = st.multiselect(
-            "Status", status_disp,
-            help="Ex.: Confirmada, Cancelada, Pendente. Vazio = todos.")
-        # nomes por sigla, p/ mostrar o significado (ex.: PTE → PTE - Presidência)
+        status_sel = st.multiselect("Status", status_disp,
+                                    help="Ex.: Confirmada, Cancelada. Vazio = todos.")
+
         mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
                   .groupby("sigla")["componente"].first().to_dict())
         rot = lambda s: f"{s} — {mapa.get(s, '')[len(s) + 3:]}".rstrip(" —")
-        siglas = st.multiselect(
-            "Componente (sigla)", sorted(mapa),
-            help="Mostra só estes componentes. Ex.: PTE = Presidência, SRE = Registro.",
-            format_func=rot)
-        excluir = st.multiselect(
-            "Excluir componentes (siglas)", sorted(mapa),
-            help="Remove dos resultados as audiências destes componentes. Ex.: buscar "
-                 "'henrique machado' e excluir 'DHM' tira as que ele conduziu como diretor.",
-            format_func=rot)
+        siglas = st.multiselect("Componente (sigla)", sorted(mapa),
+                                help="Mostra só estes componentes.", format_func=rot)
+        excluir = st.multiselect("Excluir componentes (siglas)", sorted(mapa),
+                                 help="Remove estes componentes. Ex.: buscar 'henrique "
+                                      "machado' e excluir 'DHM' tira as que ele conduziu "
+                                      "como diretor.", format_func=rot)
 
-        st.markdown("**Pessoa**")
-        pessoa_txt = st.text_input(
-            "Nome ou parte do nome (busca em todos os campos)",
-            placeholder="ex.: henrique machado")
+        st.markdown("**Pessoa** (autocompleta da base)")
+        sel_pessoa = st_searchbox(busca_nome, key="sb_pessoa",
+                                  placeholder="digite parte do nome…")
         termos = []
-        if pessoa_txt.strip():
-            cands = nomes_no_escopo(df, "any", pessoa_txt)
-            if cands:
-                escolhidas = st.multiselect(
-                    f"Variantes do nome ({len(cands)}) — desmarque as que não quiser",
-                    cands, default=cands)
-                termos = escolhidas or [pessoa_txt]
-            else:
-                termos = [pessoa_txt]
+        if sel_pessoa:
+            termos = [str(sel_pessoa)[1:] if str(sel_pessoa).startswith("~") else str(sel_pessoa)]
+
+        st.markdown("**Ordenação**")
+        ordenar_por = st.selectbox("Ordenar por",
+                                   ["Nº (ordem do pedido)", "Data da audiência"])
+        ordem_desc = st.selectbox("Ordem", ["Mais recente", "Mais antigo"]) == "Mais recente"
 
         st.divider()
-        st.caption("Dica: combine tudo (E). Para tirar um papel específico, use "
-                   "'Excluir componentes' — ex.: excluir a sigla do próprio diretor.")
+        st.caption("Dica: Assunto e Pessoa completam conforme você digita — a 1ª opção "
+                   "('tudo que contém…') traz todos os parecidos.")
 
     res = filtrar(df, de, ate, assunto, siglas, excluir, termos, status_sel)
 
@@ -263,7 +305,12 @@ def main():
 
     with aba_lista:
         st.caption("👆 Clique em uma linha para ver os detalhes completos (como no site da CVM).")
-        ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
+        asc = not ordem_desc
+        if ordenar_por.startswith("Data"):
+            ordenado = res.sort_values(["data_dt", "id"], ascending=asc, na_position="last")
+        else:
+            ordenado = res.sort_values("id", ascending=asc)
+        ordenado = ordenado.reset_index(drop=True)
         cols = ["id", "data", "hora", "componente", "assunto",
                 "solicitante_nome", "acompanhantes", "status", "link"]
         show = ordenado[cols].rename(columns={
