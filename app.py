@@ -8,6 +8,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_searchbox import st_searchbox
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
@@ -103,22 +104,50 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
-def _sugere(lista, q, n=8):
-    """Sugere itens que contêm todas as palavras do termo em digitação
-    (o trecho após a última vírgula)."""
-    termo = str(q).rsplit(",", 1)[-1]
-    ws = [w for w in termo.replace('"', " ").lower().split() if w]
-    if not ws:
+def _busca_ex(lista, q, ja):
+    """Sugestões ao vivo: itens que contêm todas as palavras digitadas, excluindo
+    os já escolhidos (`ja`). A 1ª opção permite usar o texto livre digitado.
+    Cada opção retorna já o fragmento pronto para a busca (nome entre aspas =
+    exato; texto livre sem aspas = todas as palavras)."""
+    q = (q or "").strip()
+    if len(q) < 2:
         return []
-    return [x for x in lista if all(w in x.lower() for w in ws)][:n]
+    ws = q.lower().split()
+    ja_set = set(ja)
+    opts = []
+    if q not in ja_set:
+        opts.append((f'✏️ usar: {q}', q))            # texto livre (E das palavras)
+    for x in lista:
+        frag = f'"{x}"'
+        if frag not in ja_set and all(w in x.lower() for w in ws):
+            opts.append((x, frag))                    # nome da base (exato)
+            if len(opts) >= 16:
+                break
+    return opts
 
 
-def _adicionar_termo(campo_key, valor):
-    """Acrescenta `valor` como novo termo (OU), entre aspas, ao campo de busca."""
-    atual = st.session_state.get(campo_key, "")
-    antes = atual.rsplit(",", 1)[0].strip() if "," in atual else ""
-    prefixo = (antes + ", ") if antes else ""
-    st.session_state[campo_key] = f'{prefixo}"{valor}", '
+def campo_autocomplete(rotulo, key, lista):
+    """Busca ao vivo que acumula seleções (OU) e permite remover cada uma.
+    Retorna a lista de fragmentos escolhidos."""
+    termos_key, ncnt_key = key + "_termos", key + "_n"
+    st.session_state.setdefault(termos_key, [])
+    st.session_state.setdefault(ncnt_key, 0)
+    ja = st.session_state[termos_key]
+    sel = st_searchbox(lambda q: _busca_ex(lista, q, ja),
+                       key=f"{key}_{st.session_state[ncnt_key]}",
+                       placeholder="digite para buscar…")
+    if sel and sel not in ja:
+        ja.append(sel)
+        st.session_state[ncnt_key] += 1               # recria o campo (limpa)
+        st.rerun()
+    for i, t in enumerate(list(ja)):
+        rotulo_chip = t[1:-1] if t.startswith('"') and t.endswith('"') else t
+        c1, c2 = st.columns([5, 1])
+        c1.markdown(f"🔎 {rotulo_chip}")
+        if c2.button("✕", key=f"{key}_rm_{i}", help="remover"):
+            ja.pop(i)
+            st.rerun()
+    return ja
 
 
 def parse_busca(q):
@@ -308,14 +337,13 @@ def main():
         if sugerir:
             nomes_idx, assuntos_idx = indices()
 
-        assunto_q = st.text_input(
-            "Assunto", key="q_assunto",
-            help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
-        if sugerir and assunto_q.strip():
-            for s in _sugere(assuntos_idx, assunto_q):
-                st.button("➕ " + (s[:55] + "…" if len(s) > 56 else s),
-                          key="sa_" + s, use_container_width=True,
-                          on_click=_adicionar_termo, args=("q_assunto", s))
+        st.markdown("**Assunto**")
+        if sugerir:
+            assunto_q = ", ".join(campo_autocomplete("Assunto", "ac_assunto", assuntos_idx))
+        else:
+            assunto_q = st.text_input(
+                "Assunto", key="q_assunto", label_visibility="collapsed",
+                help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
 
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
         status_sel = st.multiselect("Status", status_disp,
@@ -331,19 +359,19 @@ def main():
                                       "machado' e excluir 'DHM' tira as que ele conduziu "
                                       "como diretor.", format_func=rot)
 
-        pessoa_q = st.text_input(
-            "Pessoa (nome)", key="q_pessoa",
-            help='Ex.: felipe claudino → tem as duas palavras. "felipe claudino" = '
-                 'exato. Vírgula = OU (ex.: vorcaro, machado).')
-        if sugerir and pessoa_q.strip():
-            for s in _sugere(nomes_idx, pessoa_q):
-                st.button("➕ " + (s[:55] + "…" if len(s) > 56 else s),
-                          key="sp_" + s, use_container_width=True,
-                          on_click=_adicionar_termo, args=("q_pessoa", s))
+        st.markdown("**Pessoa (nome)**")
+        if sugerir:
+            pessoa_q = ", ".join(campo_autocomplete("Pessoa", "ac_pessoa", nomes_idx))
+        else:
+            pessoa_q = st.text_input(
+                "Pessoa (nome)", key="q_pessoa", label_visibility="collapsed",
+                help='Ex.: felipe claudino → tem as duas palavras. "felipe claudino" = '
+                     'exato. Vírgula = OU (ex.: vorcaro, machado).')
 
         st.divider()
-        st.caption("Dica: clique no cabeçalho de uma coluna (Nº, Data…) para ordenar. "
-                   "Em Assunto e Pessoa, digite para filtrar e escolha vários itens.")
+        st.caption("Dica: com o Autocomplete ligado, digite e as sugestões aparecem ao "
+                   "vivo; clique para adicionar (o item some da lista). Desligado, é texto "
+                   "livre. Clique no cabeçalho da coluna para ordenar.")
 
     res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
 
