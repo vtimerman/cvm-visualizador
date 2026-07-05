@@ -286,14 +286,9 @@ def main():
         if sel_pessoa:
             termos = [str(sel_pessoa)[1:] if str(sel_pessoa).startswith("~") else str(sel_pessoa)]
 
-        st.markdown("**Ordenação**")
-        ordenar_por = st.selectbox("Ordenar por",
-                                   ["Nº (ordem do pedido)", "Data da audiência"])
-        ordem_desc = st.selectbox("Ordem", ["Mais recente", "Mais antigo"]) == "Mais recente"
-
         st.divider()
-        st.caption("Dica: Assunto e Pessoa completam conforme você digita — a 1ª opção "
-                   "('tudo que contém…') traz todos os parecidos.")
+        st.caption("Dica: clique no cabeçalho de uma coluna (Nº, Data…) para ordenar. "
+                   "Assunto e Pessoa completam conforme você digita.")
 
     res = filtrar(df, de, ate, assunto, siglas, excluir, termos, status_sel)
 
@@ -310,12 +305,7 @@ def main():
 
     with aba_lista:
         st.caption("👆 Clique em uma linha para ver os detalhes completos (como no site da CVM).")
-        asc = not ordem_desc
-        if ordenar_por.startswith("Data"):
-            ordenado = res.sort_values(["data_dt", "id"], ascending=asc, na_position="last")
-        else:
-            ordenado = res.sort_values("id", ascending=asc)
-        ordenado = ordenado.reset_index(drop=True)
+        ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
         cols = ["id", "data", "hora", "componente", "assunto",
                 "solicitante_nome", "acompanhantes", "status", "link"]
         show = ordenado[cols].rename(columns={
