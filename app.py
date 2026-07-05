@@ -298,13 +298,18 @@ def main():
     # ---- filtros (barra lateral) ----
     with st.sidebar:
         st.header("Filtros")
+        if st.button("🧹 Limpar filtros", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                if k.startswith(("f_", "q_assunto", "q_pessoa", "ac_assunto", "ac_pessoa")):
+                    del st.session_state[k]
+            st.rerun()
         validas = df.dropna(subset=["data_dt"])
         dmin = validas["data_dt"].min().date() if len(validas) else dt.date(1948, 1, 1)
         dmax = validas["data_dt"].max().date() if len(validas) else dt.date.today()
 
         hoje = dt.date.today()
         atalho = st.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
-                                      "Futuro", "Personalizado"], index=0)
+                                      "Futuro", "Personalizado"], index=0, key="f_periodo")
         de = ate = None
         if atalho == "Hoje":
             de = ate = hoje
@@ -317,13 +322,13 @@ def main():
         elif atalho == "Futuro":
             de = hoje + dt.timedelta(days=1)
         elif atalho == "Personalizado":
-            de = st.date_input("De (data inicial)", value=None,
+            de = st.date_input("De (data inicial)", value=None, key="f_de",
                                min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-            ate = st.date_input("Até (data final)", value=None,
+            ate = st.date_input("Até (data final)", value=None, key="f_ate",
                                 min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
 
         sugerir = st.checkbox(
-            "💡 Autocomplete (sugerir da base)", value=False,
+            "💡 Autocomplete (sugerir da base)", value=False, key="f_sugerir",
             help="Mostra nomes/assuntos da base que combinam. As sugestões só entram "
                  "se você CLICAR — você sempre pode digitar um texto livre.")
         nomes_idx = assuntos_idx = []
@@ -339,15 +344,15 @@ def main():
                 help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
 
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
-        status_sel = st.multiselect("Status", status_disp,
+        status_sel = st.multiselect("Status", status_disp, key="f_status",
                                     help="Ex.: Confirmada, Cancelada. Vazio = todos.")
 
         mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
                   .groupby("sigla")["componente"].first().to_dict())
         rot = lambda s: f"{s} — {mapa.get(s, '')[len(s) + 3:]}".rstrip(" —")
-        siglas = st.multiselect("Componente (sigla)", sorted(mapa),
+        siglas = st.multiselect("Componente (sigla)", sorted(mapa), key="f_siglas",
                                 help="Mostra só estes componentes.", format_func=rot)
-        excluir = st.multiselect("Excluir componentes (siglas)", sorted(mapa),
+        excluir = st.multiselect("Excluir componentes (siglas)", sorted(mapa), key="f_excluir",
                                  help="Remove estes componentes. Ex.: buscar 'henrique "
                                       "machado' e excluir 'DHM' tira as que ele conduziu "
                                       "como diretor.", format_func=rot)
