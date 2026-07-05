@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Visualizador das Audiencias Particulares da CVM."""
 import os
+import re
 import sqlite3
 import datetime as dt
 
@@ -52,7 +53,41 @@ def carregar() -> pd.DataFrame:
     return df
 
 
-def filtrar(df, de, ate, assunto, pessoa, siglas):
+# Onde a pessoa pode aparecer:
+#  part = participante externo (solicitante + acompanhantes)
+#  dir  = diretor/órgão da CVM que recebeu (campo "componente")
+#  obs  = texto livre das observações
+#  any  = qualquer um desses campos
+ESCOPOS = {
+    "part": ["solicitante_nome", "acompanhantes"],
+    "dir": ["componente"],
+    "obs": ["observacoes"],
+    "any": ["solicitante_nome", "acompanhantes", "componente", "observacoes"],
+}
+
+
+def _texto_escopo(df, onde):
+    cols = ESCOPOS[onde]
+    s = df[cols[0]].fillna("")
+    for c in cols[1:]:
+        s = s + " ||| " + df[c].fillna("")
+    return s.str.lower()
+
+
+def nomes_no_escopo(df, onde, texto):
+    """Nomes distintos, no escopo, que contêm o texto — para o usuário escolher variantes."""
+    nomes = set()
+    if onde in ("part", "any"):
+        nomes |= set(df["solicitante_nome"].dropna())
+        for a in df["acompanhantes"].dropna():
+            nomes |= {x.strip() for x in a.split("|") if x.strip()}
+    if onde in ("dir", "any"):
+        nomes |= set(df["componente"].dropna())
+    t = texto.strip().lower()
+    return sorted(n for n in nomes if n and t in n.lower())
+
+
+def filtrar(df, de, ate, assunto, siglas, termos, onde):
     m = pd.Series(True, index=df.index)
     if de:
         m &= df["data_dt"] >= pd.Timestamp(de)
@@ -60,13 +95,16 @@ def filtrar(df, de, ate, assunto, pessoa, siglas):
         m &= df["data_dt"] <= pd.Timestamp(ate)
     if assunto:
         m &= df["assunto"].str.contains(assunto, case=False, na=False)
-    if pessoa:
-        alvo = (df["solicitante_nome"].fillna("") + " | "
-                + df["acompanhantes"].fillna("") + " | "
-                + df["observacoes"].fillna(""))
-        m &= alvo.str.contains(pessoa, case=False, na=False)
     if siglas:
         m &= df["sigla"].isin(siglas)
+    if termos:
+        alvo = _texto_escopo(df, onde)
+        mt = pd.Series(False, index=df.index)
+        for t in termos:
+            t = (t or "").strip().lower()
+            if t:
+                mt |= alvo.str.contains(re.escape(t), na=False)
+        m &= mt
     return df[m]
 
 
@@ -99,20 +137,50 @@ def main():
         if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
             de, ate = periodo
         assunto = st.text_input("Assunto contém")
-        pessoa = st.text_input("Pessoa (solicitante/acompanhante)")
         # nomes por sigla, p/ mostrar o significado (ex.: PTE → PTE - Presidência)
         mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
                   .groupby("sigla")["componente"].first().to_dict())
-        siglas_disp = sorted(mapa)
         siglas = st.multiselect(
-            "Componente (sigla)", siglas_disp,
+            "Componente (sigla)", sorted(mapa),
             help="Ex.: PTE = Presidência, SRE = Superint. de Registro. "
                  "Escolha uma ou várias e combine com o período.",
             format_func=lambda s: f"{s} — {mapa.get(s, '')[len(s)+3:]}".rstrip(" —"))
-        st.divider()
-        st.caption("Dica: combine filtros — sigla + período + assunto/pessoa funcionam em conjunto (E).")
 
-    res = filtrar(df, de, ate, assunto, pessoa, siglas)
+        st.markdown("**Pessoa**")
+        onde_lbl = st.radio(
+            "Onde a pessoa aparece",
+            ["Participante (solicitante/acompanhante)",
+             "Diretor/órgão (componente)",
+             "Observações",
+             "Qualquer campo"],
+            index=0,
+            help="Ex.: para achar alguém como VISITANTE, e não no papel de diretor "
+                 "da CVM, escolha 'Participante'.")
+        onde = {"Participante (solicitante/acompanhante)": "part",
+                "Diretor/órgão (componente)": "dir",
+                "Observações": "obs",
+                "Qualquer campo": "any"}[onde_lbl]
+        pessoa_txt = st.text_input("Nome ou parte do nome",
+                                   placeholder="ex.: daniel vorcaro")
+        termos = []
+        if pessoa_txt.strip():
+            if onde == "obs":
+                termos = [pessoa_txt]
+            else:
+                cands = nomes_no_escopo(df, onde, pessoa_txt)
+                if cands:
+                    escolhidas = st.multiselect(
+                        f"Variantes encontradas ({len(cands)}) — desmarque as que não quiser",
+                        cands, default=cands)
+                    termos = escolhidas or [pessoa_txt]
+                else:
+                    st.caption("Nenhum nome encontrado nesse escopo; usando o texto digitado.")
+                    termos = [pessoa_txt]
+
+        st.divider()
+        st.caption("Dica: combine tudo — sigla + período + assunto + pessoa funcionam em conjunto (E).")
+
+    res = filtrar(df, de, ate, assunto, siglas, termos, onde)
 
     # ---- métricas ----
     c1, c2, c3 = st.columns(3)
