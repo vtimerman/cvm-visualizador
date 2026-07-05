@@ -56,5 +56,7 @@ jobs:
             echo "Sem mudancas na base."
           else
             git commit -m "coleta: atualiza base ($(date -u +%FT%TZ))"
+            # robusto a pushes concorrentes (mantém a base deste run em conflito)
+            git pull --rebase -X ours origin main || true
             git push
           fi

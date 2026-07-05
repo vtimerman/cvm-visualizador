@@ -173,11 +173,9 @@ def _card(titulo, nome, empresa, cargo):
             f'</table>')
 
 
-def render_detalhe(row):
+def conteudo_detalhe(row):
     """Reproduz a página da CVM (mesmo HTML/CSS) com os dados da audiência."""
-    st.divider()
-    _, cb = st.columns([3, 1])
-    cb.link_button("Abrir na CVM ↗", row["link"], use_container_width=True)
+    st.link_button("Abrir no site da CVM ↗", row["link"])
 
     e = _esc
     acs = [a.strip() for a in str(row["acompanhantes"] or "").split(" | ") if a.strip()]
@@ -211,6 +209,11 @@ def render_detalhe(row):
     components.html(doc, height=110 + 300 + n_linhas_cards * 200, scrolling=True)
 
 
+@st.dialog("Audiência Particular", width="large")
+def dialog_detalhe(row):
+    conteudo_detalhe(row)
+
+
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
@@ -237,7 +240,7 @@ def main():
 
         hoje = dt.date.today()
         atalho = st.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
-                                      "Personalizado"], index=0)
+                                      "Futuro", "Personalizado"], index=0)
         de = ate = None
         if atalho == "Hoje":
             de = ate = hoje
@@ -247,6 +250,8 @@ def main():
         elif atalho == "Este mês":
             de = hoje.replace(day=1)
             ate = (de + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+        elif atalho == "Futuro":
+            de = hoje + dt.timedelta(days=1)
         elif atalho == "Personalizado":
             de = st.date_input("De (data inicial)", value=None,
                                min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
@@ -328,7 +333,10 @@ def main():
             file_name="audiencias_cvm.csv", mime="text/csv")
         sel = event.selection.rows if getattr(event, "selection", None) else []
         if sel:
-            render_detalhe(ordenado.iloc[sel[0]])
+            sel_id = int(ordenado.iloc[sel[0]]["id"])
+            if sel_id != st.session_state.get("dlg_id"):
+                st.session_state["dlg_id"] = sel_id
+                dialog_detalhe(ordenado.iloc[sel[0]])
 
     with aba_panorama:
         rr = res.dropna(subset=["data_dt"])
