@@ -87,7 +87,7 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
-def filtrar(df, de, ate, assunto, siglas, termos, onde):
+def filtrar(df, de, ate, assunto, siglas, excluir_siglas, termos):
     m = pd.Series(True, index=df.index)
     if de:
         m &= df["data_dt"] >= pd.Timestamp(de)
@@ -97,8 +97,10 @@ def filtrar(df, de, ate, assunto, siglas, termos, onde):
         m &= df["assunto"].str.contains(assunto, case=False, na=False)
     if siglas:
         m &= df["sigla"].isin(siglas)
+    if excluir_siglas:
+        m &= ~df["sigla"].isin(excluir_siglas)
     if termos:
-        alvo = _texto_escopo(df, onde)
+        alvo = _texto_escopo(df, "any")
         mt = pd.Series(False, index=df.index)
         for t in termos:
             t = (t or "").strip().lower()
@@ -140,47 +142,37 @@ def main():
         # nomes por sigla, p/ mostrar o significado (ex.: PTE → PTE - Presidência)
         mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
                   .groupby("sigla")["componente"].first().to_dict())
+        rot = lambda s: f"{s} — {mapa.get(s, '')[len(s) + 3:]}".rstrip(" —")
         siglas = st.multiselect(
             "Componente (sigla)", sorted(mapa),
-            help="Ex.: PTE = Presidência, SRE = Superint. de Registro. "
-                 "Escolha uma ou várias e combine com o período.",
-            format_func=lambda s: f"{s} — {mapa.get(s, '')[len(s)+3:]}".rstrip(" —"))
+            help="Mostra só estes componentes. Ex.: PTE = Presidência, SRE = Registro.",
+            format_func=rot)
+        excluir = st.multiselect(
+            "Excluir componentes (siglas)", sorted(mapa),
+            help="Remove dos resultados as audiências destes componentes. Ex.: buscar "
+                 "'henrique machado' e excluir 'DHM' tira as que ele conduziu como diretor.",
+            format_func=rot)
 
         st.markdown("**Pessoa**")
-        onde_lbl = st.radio(
-            "Onde a pessoa aparece",
-            ["Participante (solicitante/acompanhante)",
-             "Diretor/órgão (componente)",
-             "Observações",
-             "Qualquer campo"],
-            index=0,
-            help="Ex.: para achar alguém como VISITANTE, e não no papel de diretor "
-                 "da CVM, escolha 'Participante'.")
-        onde = {"Participante (solicitante/acompanhante)": "part",
-                "Diretor/órgão (componente)": "dir",
-                "Observações": "obs",
-                "Qualquer campo": "any"}[onde_lbl]
-        pessoa_txt = st.text_input("Nome ou parte do nome",
-                                   placeholder="ex.: daniel vorcaro")
+        pessoa_txt = st.text_input(
+            "Nome ou parte do nome (busca em todos os campos)",
+            placeholder="ex.: henrique machado")
         termos = []
         if pessoa_txt.strip():
-            if onde == "obs":
-                termos = [pessoa_txt]
+            cands = nomes_no_escopo(df, "any", pessoa_txt)
+            if cands:
+                escolhidas = st.multiselect(
+                    f"Variantes do nome ({len(cands)}) — desmarque as que não quiser",
+                    cands, default=cands)
+                termos = escolhidas or [pessoa_txt]
             else:
-                cands = nomes_no_escopo(df, onde, pessoa_txt)
-                if cands:
-                    escolhidas = st.multiselect(
-                        f"Variantes encontradas ({len(cands)}) — desmarque as que não quiser",
-                        cands, default=cands)
-                    termos = escolhidas or [pessoa_txt]
-                else:
-                    st.caption("Nenhum nome encontrado nesse escopo; usando o texto digitado.")
-                    termos = [pessoa_txt]
+                termos = [pessoa_txt]
 
         st.divider()
-        st.caption("Dica: combine tudo — sigla + período + assunto + pessoa funcionam em conjunto (E).")
+        st.caption("Dica: combine tudo (E). Para tirar um papel específico, use "
+                   "'Excluir componentes' — ex.: excluir a sigla do próprio diretor.")
 
-    res = filtrar(df, de, ate, assunto, siglas, termos, onde)
+    res = filtrar(df, de, ate, assunto, siglas, excluir, termos)
 
     # ---- métricas ----
     c1, c2, c3 = st.columns(3)
