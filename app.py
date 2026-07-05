@@ -103,32 +103,70 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
-def filtrar(df, de, ate, assunto_termos, siglas, excluir_siglas, termos, status_sel):
+def parse_busca(q):
+    """Interpreta a consulta.
+    - vírgula separa alternativas (OU)
+    - "entre aspas" = frase exata
+    - várias palavras soltas = todas juntas (E)
+    Retorna lista de grupos: ("frase", texto) ou ("e", [palavras]).
+    """
+    grupos = []
+    for parte in str(q).split(","):
+        parte = parte.strip()
+        if not parte:
+            continue
+        m = re.fullmatch(r'"(.*)"', parte)
+        if m:
+            frase = m.group(1).strip().lower()
+            if frase:
+                grupos.append(("frase", frase))
+        else:
+            palavras = [w.lower() for w in parte.split() if w]
+            if palavras:
+                grupos.append(("e", palavras))
+    return grupos
+
+
+def match_busca(df, cols, q):
+    """True p/ linhas em que ALGUM campo de `cols` satisfaz ALGUM grupo da busca."""
+    grupos = parse_busca(q)
+    if not grupos:
+        return pd.Series(True, index=df.index)
+    colunas = [df[c].fillna("").str.lower() for c in cols]
+    total = pd.Series(False, index=df.index)
+    for tipo, val in grupos:
+        gmatch = pd.Series(False, index=df.index)
+        for col in colunas:
+            if tipo == "frase":
+                gmatch |= col.str.contains(re.escape(val), na=False)
+            else:  # todas as palavras no mesmo campo
+                campo = pd.Series(True, index=df.index)
+                for w in val:
+                    campo &= col.str.contains(re.escape(w), na=False)
+                gmatch |= campo
+        total |= gmatch
+    return total
+
+
+CAMPOS_PESSOA = ["solicitante_nome", "acompanhantes", "componente", "observacoes"]
+
+
+def filtrar(df, de, ate, assunto_q, siglas, excluir_siglas, pessoa_q, status_sel):
     m = pd.Series(True, index=df.index)
     if de:
         m &= df["data_dt"] >= pd.Timestamp(de)
     if ate:
         m &= df["data_dt"] <= pd.Timestamp(ate)
-    if assunto_termos:
-        col = df["assunto"].fillna("").str.lower()
-        ma = pd.Series(False, index=df.index)
-        for a in assunto_termos:
-            ma |= col.str.contains(re.escape(str(a).lower()), na=False)
-        m &= ma
+    if assunto_q and assunto_q.strip():
+        m &= match_busca(df, ["assunto"], assunto_q)
     if siglas:
         m &= df["sigla"].isin(siglas)
     if excluir_siglas:
         m &= ~df["sigla"].isin(excluir_siglas)
     if status_sel:
         m &= df["status"].isin(status_sel)
-    if termos:
-        alvo = _texto_escopo(df, "any")
-        mt = pd.Series(False, index=df.index)
-        for t in termos:
-            t = (t or "").strip().lower()
-            if t:
-                mt |= alvo.str.contains(re.escape(t), na=False)
-        m &= mt
+    if pessoa_q and pessoa_q.strip():
+        m &= match_busca(df, CAMPOS_PESSOA, pessoa_q)
     return df[m]
 
 
@@ -244,10 +282,10 @@ def main():
             ate = st.date_input("Até (data final)", value=None,
                                 min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
 
-        nomes_idx, assuntos_idx = indices()
-        assunto_termos = st.multiselect(
-            "Assunto (um ou vários)", assuntos_idx,
-            help="Digite para filtrar e escolha um ou mais assuntos. Combina em OU.")
+        assunto_q = st.text_input(
+            "Assunto",
+            help='Palavras juntas = E (todas no campo). "aspas" = frase exata. '
+                 'Vírgula = OU. Ex.: processo fundo')
 
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
         status_sel = st.multiselect("Status", status_disp,
@@ -263,15 +301,16 @@ def main():
                                       "machado' e excluir 'DHM' tira as que ele conduziu "
                                       "como diretor.", format_func=rot)
 
-        termos = st.multiselect(
-            "Pessoa (um ou vários nomes)", nomes_idx,
-            help="Solicitante, acompanhante ou diretor. Escolha vários — combina em OU.")
+        pessoa_q = st.text_input(
+            "Pessoa (nome)",
+            help='Ex.: felipe claudino → tem as duas palavras. "felipe claudino" = '
+                 'exato. Vírgula = OU (ex.: vorcaro, machado).')
 
         st.divider()
         st.caption("Dica: clique no cabeçalho de uma coluna (Nº, Data…) para ordenar. "
                    "Em Assunto e Pessoa, digite para filtrar e escolha vários itens.")
 
-    res = filtrar(df, de, ate, assunto_termos, siglas, excluir, termos, status_sel)
+    res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
 
     # ---- métricas ----
     c1, c2 = st.columns(2)
