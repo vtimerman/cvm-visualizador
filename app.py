@@ -103,46 +103,6 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
-def campo_multi(rotulo, key, lista):
-    """Busca multi-palavra + escolha de VÁRIOS de uma vez, acumulando (OU).
-    Retorna a lista de fragmentos escolhidos (nome entre aspas = exato)."""
-    termos_key, n_key = key + "_termos", key + "_n"
-    st.session_state.setdefault(termos_key, [])
-    st.session_state.setdefault(n_key, 0)
-    ja = st.session_state[termos_key]
-    n = st.session_state[n_key]
-
-    busca = st.text_input(f"Buscar {rotulo.lower()} (Enter)", key=f"{key}_b_{n}",
-                          placeholder="ex.: claudino")
-    if busca.strip():
-        ws = busca.lower().split()
-        jaset = set(ja)
-        matches = [x for x in lista
-                   if f'"{x}"' not in jaset and all(w in x.lower() for w in ws)][:200]
-        if matches:
-            escolhidos = st.multiselect(
-                f"{len(matches)} encontrado(s) — marque vários:", matches,
-                key=f"{key}_ms_{n}", label_visibility="visible")
-            if st.button("➕ Adicionar à busca", key=f"{key}_add_{n}",
-                         use_container_width=True, disabled=not escolhidos):
-                ja.extend(f'"{x}"' for x in escolhidos)
-                st.session_state[n_key] += 1          # limpa busca + seleção
-                st.rerun()
-        else:
-            st.caption("Nenhum resultado com esse texto.")
-
-    if ja:
-        st.caption("Na busca (clique ✕ para tirar):")
-        for i, t in enumerate(list(ja)):
-            disp = t[1:-1] if t.startswith('"') and t.endswith('"') else t
-            c1, c2 = st.columns([6, 1])
-            c1.markdown(f"🔎 {disp}")
-            if c2.button("✕", key=f"{key}_rm_{i}_{n}", help="remover"):
-                ja.pop(i)
-                st.rerun()
-    return ja
-
-
 def parse_busca(q):
     """Interpreta a consulta.
     - vírgula separa alternativas (OU)
@@ -337,7 +297,11 @@ def main():
 
         st.markdown("**Assunto**")
         if sugerir:
-            assunto_q = ", ".join(campo_multi("Assunto", "ac_assunto", assuntos_idx))
+            _asel = st.multiselect(
+                "Assunto", assuntos_idx, key="f_ms_assunto",
+                label_visibility="collapsed",
+                placeholder="digite p/ filtrar e marque vários…")
+            assunto_q = ", ".join(f'"{x}"' for x in _asel)
         else:
             assunto_q = st.text_input(
                 "Assunto", key="q_assunto", label_visibility="collapsed",
@@ -359,7 +323,11 @@ def main():
 
         st.markdown("**Pessoa (nome)**")
         if sugerir:
-            pessoa_q = ", ".join(campo_multi("Pessoa", "ac_pessoa", nomes_idx))
+            _psel = st.multiselect(
+                "Pessoa", nomes_idx, key="f_ms_pessoa",
+                label_visibility="collapsed",
+                placeholder="digite p/ filtrar e marque vários…")
+            pessoa_q = ", ".join(f'"{x}"' for x in _psel)
         else:
             pessoa_q = st.text_input(
                 "Pessoa (nome)", key="q_pessoa", label_visibility="collapsed",
