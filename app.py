@@ -104,11 +104,21 @@ def nomes_no_escopo(df, onde, texto):
 
 
 def _sugere(lista, q, n=8):
-    """Itens da lista que contêm todas as palavras digitadas (para sugerir)."""
-    ws = [w for w in str(q).replace('"', " ").replace(",", " ").lower().split() if w]
+    """Sugere itens que contêm todas as palavras do termo em digitação
+    (o trecho após a última vírgula)."""
+    termo = str(q).rsplit(",", 1)[-1]
+    ws = [w for w in termo.replace('"', " ").lower().split() if w]
     if not ws:
         return []
     return [x for x in lista if all(w in x.lower() for w in ws)][:n]
+
+
+def _adicionar_termo(campo_key, valor):
+    """Acrescenta `valor` como novo termo (OU), entre aspas, ao campo de busca."""
+    atual = st.session_state.get(campo_key, "")
+    antes = atual.rsplit(",", 1)[0].strip() if "," in atual else ""
+    prefixo = (antes + ", ") if antes else ""
+    st.session_state[campo_key] = f'{prefixo}"{valor}", '
 
 
 def parse_busca(q):
@@ -303,9 +313,9 @@ def main():
             help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
         if sugerir and assunto_q.strip():
             for s in _sugere(assuntos_idx, assunto_q):
-                st.button("↳ " + (s[:55] + "…" if len(s) > 56 else s),
+                st.button("➕ " + (s[:55] + "…" if len(s) > 56 else s),
                           key="sa_" + s, use_container_width=True,
-                          on_click=lambda v=s: st.session_state.update(q_assunto=v))
+                          on_click=_adicionar_termo, args=("q_assunto", s))
 
         status_disp = sorted(s for s in df["status"].dropna().unique() if s)
         status_sel = st.multiselect("Status", status_disp,
@@ -327,9 +337,9 @@ def main():
                  'exato. Vírgula = OU (ex.: vorcaro, machado).')
         if sugerir and pessoa_q.strip():
             for s in _sugere(nomes_idx, pessoa_q):
-                st.button("↳ " + (s[:55] + "…" if len(s) > 56 else s),
+                st.button("➕ " + (s[:55] + "…" if len(s) > 56 else s),
                           key="sp_" + s, use_container_width=True,
-                          on_click=lambda v=s: st.session_state.update(q_pessoa=v))
+                          on_click=_adicionar_termo, args=("q_pessoa", s))
 
         st.divider()
         st.caption("Dica: clique no cabeçalho de uma coluna (Nº, Data…) para ordenar. "
