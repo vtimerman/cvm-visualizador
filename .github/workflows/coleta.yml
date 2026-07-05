@@ -1,0 +1,60 @@
+name: Coleta CVM
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"      # a cada 30 minutos
+  workflow_dispatch:            # permite rodar manualmente (inclusive backfill)
+    inputs:
+      modo:
+        description: "atualizar (padrao) ou backfill"
+        default: "atualizar"
+      ini:
+        description: "id inicial (so no backfill)"
+        default: "1"
+      fim:
+        description: "id final (so no backfill)"
+        default: "33000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coleta-cvm
+  cancel-in-progress: false     # nao interrompe um backfill longo em andamento
+
+jobs:
+  coleta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Rodar coleta
+        env:
+          PAUSA: "0.4"
+        run: |
+          modo="${{ github.event.inputs.modo }}"
+          if [ "$modo" = "backfill" ]; then
+            python scraper.py backfill "${{ github.event.inputs.ini }}" "${{ github.event.inputs.fim }}"
+          else
+            python scraper.py atualizar
+          fi
+          python scraper.py stats
+
+      - name: Publicar base atualizada
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add audiencias.db
+          if git diff --cached --quiet; then
+            echo "Sem mudancas na base."
+          else
+            git commit -m "coleta: atualiza base ($(date -u +%FT%TZ))"
+            git push
+          fi
