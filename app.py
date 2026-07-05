@@ -133,11 +133,11 @@ def main():
         validas = df.dropna(subset=["data_dt"])
         dmin = validas["data_dt"].min().date() if len(validas) else dt.date(1948, 1, 1)
         dmax = validas["data_dt"].max().date() if len(validas) else dt.date.today()
-        periodo = st.date_input("Período da audiência", value=(dmin, dmax),
-                                min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-        de = ate = None
-        if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
-            de, ate = periodo
+        st.caption("Deixe em branco para não limitar aquele lado.")
+        de = st.date_input("De (data inicial)", value=None,
+                           min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
+        ate = st.date_input("Até (data final)", value=None,
+                            min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
         assunto = st.text_input("Assunto contém")
         # nomes por sigla, p/ mostrar o significado (ex.: PTE → PTE - Presidência)
         mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
@@ -175,13 +175,13 @@ def main():
     res = filtrar(df, de, ate, assunto, siglas, excluir, termos)
 
     # ---- métricas ----
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
     c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
-    if len(res.dropna(subset=["data_dt"])):
-        rr = res.dropna(subset=["data_dt"])
-        c3.metric("Período dos resultados",
-                  f"{rr['data_dt'].min():%d/%m/%Y} – {rr['data_dt'].max():%d/%m/%Y}")
+    rr = res.dropna(subset=["data_dt"])
+    if len(rr):
+        st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
+                   f"a **{rr['data_dt'].max():%d/%m/%Y}**")
 
     aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
 
