@@ -47,10 +47,12 @@ def carregar() -> pd.DataFrame:
     df = pd.read_sql("SELECT * FROM audiencias WHERE estado='valido'", con)
     con.close()
     df["data_dt"] = pd.to_datetime(df["data_iso"], errors="coerce")
+    # sigla = parte antes do " - " (ex.: "PTE - Presidência" -> "PTE")
+    df["sigla"] = df["componente"].fillna("").str.split(" - ").str[0].str.strip()
     return df
 
 
-def filtrar(df, de, ate, assunto, pessoa, componentes):
+def filtrar(df, de, ate, assunto, pessoa, siglas):
     m = pd.Series(True, index=df.index)
     if de:
         m &= df["data_dt"] >= pd.Timestamp(de)
@@ -63,8 +65,8 @@ def filtrar(df, de, ate, assunto, pessoa, componentes):
                 + df["acompanhantes"].fillna("") + " | "
                 + df["observacoes"].fillna(""))
         m &= alvo.str.contains(pessoa, case=False, na=False)
-    if componentes:
-        m &= df["componente"].isin(componentes)
+    if siglas:
+        m &= df["sigla"].isin(siglas)
     return df[m]
 
 
@@ -98,12 +100,19 @@ def main():
             de, ate = periodo
         assunto = st.text_input("Assunto contém")
         pessoa = st.text_input("Pessoa (solicitante/acompanhante)")
-        comps = sorted(c for c in df["componente"].dropna().unique() if c)
-        componentes = st.multiselect("Componente organizacional", comps)
+        # nomes por sigla, p/ mostrar o significado (ex.: PTE → PTE - Presidência)
+        mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
+                  .groupby("sigla")["componente"].first().to_dict())
+        siglas_disp = sorted(mapa)
+        siglas = st.multiselect(
+            "Componente (sigla)", siglas_disp,
+            help="Ex.: PTE = Presidência, SRE = Superint. de Registro. "
+                 "Escolha uma ou várias e combine com o período.",
+            format_func=lambda s: f"{s} — {mapa.get(s, '')[len(s)+3:]}".rstrip(" —"))
         st.divider()
-        st.caption("Dica: combine filtros. Todos funcionam em conjunto (E).")
+        st.caption("Dica: combine filtros — sigla + período + assunto/pessoa funcionam em conjunto (E).")
 
-    res = filtrar(df, de, ate, assunto, pessoa, componentes)
+    res = filtrar(df, de, ate, assunto, pessoa, siglas)
 
     # ---- métricas ----
     c1, c2, c3 = st.columns(3)
