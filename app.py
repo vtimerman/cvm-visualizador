@@ -8,7 +8,6 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_searchbox import st_searchbox
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
@@ -104,49 +103,43 @@ def nomes_no_escopo(df, onde, texto):
     return sorted(n for n in nomes if n and t in n.lower())
 
 
-def _busca_ex(lista, q, ja):
-    """Sugestões ao vivo: itens que contêm todas as palavras digitadas, excluindo
-    os já escolhidos (`ja`). A 1ª opção permite usar o texto livre digitado.
-    Cada opção retorna já o fragmento pronto para a busca (nome entre aspas =
-    exato; texto livre sem aspas = todas as palavras)."""
-    q = (q or "").strip()
-    if len(q) < 2:
-        return []
-    ws = q.lower().split()
-    ja_set = set(ja)
-    opts = []
-    if q not in ja_set:
-        opts.append((f'✏️ usar: {q}', q))            # texto livre (E das palavras)
-    for x in lista:
-        frag = f'"{x}"'
-        if frag not in ja_set and all(w in x.lower() for w in ws):
-            opts.append((x, frag))                    # nome da base (exato)
-            if len(opts) >= 16:
-                break
-    return opts
-
-
-def campo_autocomplete(rotulo, key, lista):
-    """Busca ao vivo que acumula seleções (OU) e permite remover cada uma.
-    Retorna a lista de fragmentos escolhidos."""
-    termos_key, ncnt_key = key + "_termos", key + "_n"
+def campo_multi(rotulo, key, lista):
+    """Busca multi-palavra + escolha de VÁRIOS de uma vez, acumulando (OU).
+    Retorna a lista de fragmentos escolhidos (nome entre aspas = exato)."""
+    termos_key, n_key = key + "_termos", key + "_n"
     st.session_state.setdefault(termos_key, [])
-    st.session_state.setdefault(ncnt_key, 0)
+    st.session_state.setdefault(n_key, 0)
     ja = st.session_state[termos_key]
-    sel = st_searchbox(lambda q: _busca_ex(lista, q, ja),
-                       key=f"{key}_{st.session_state[ncnt_key]}",
-                       placeholder="digite para buscar…")
-    if sel and sel not in ja:
-        ja.append(sel)
-        st.session_state[ncnt_key] += 1               # recria o campo (limpa)
-        st.rerun()
-    for i, t in enumerate(list(ja)):
-        rotulo_chip = t[1:-1] if t.startswith('"') and t.endswith('"') else t
-        c1, c2 = st.columns([5, 1])
-        c1.markdown(f"🔎 {rotulo_chip}")
-        if c2.button("✕", key=f"{key}_rm_{i}", help="remover"):
-            ja.pop(i)
-            st.rerun()
+    n = st.session_state[n_key]
+
+    busca = st.text_input(f"Buscar {rotulo.lower()} (Enter)", key=f"{key}_b_{n}",
+                          placeholder="ex.: claudino")
+    if busca.strip():
+        ws = busca.lower().split()
+        jaset = set(ja)
+        matches = [x for x in lista
+                   if f'"{x}"' not in jaset and all(w in x.lower() for w in ws)][:200]
+        if matches:
+            escolhidos = st.multiselect(
+                f"{len(matches)} encontrado(s) — marque vários:", matches,
+                key=f"{key}_ms_{n}", label_visibility="visible")
+            if st.button("➕ Adicionar à busca", key=f"{key}_add_{n}",
+                         use_container_width=True, disabled=not escolhidos):
+                ja.extend(f'"{x}"' for x in escolhidos)
+                st.session_state[n_key] += 1          # limpa busca + seleção
+                st.rerun()
+        else:
+            st.caption("Nenhum resultado com esse texto.")
+
+    if ja:
+        st.caption("Na busca (clique ✕ para tirar):")
+        for i, t in enumerate(list(ja)):
+            disp = t[1:-1] if t.startswith('"') and t.endswith('"') else t
+            c1, c2 = st.columns([6, 1])
+            c1.markdown(f"🔎 {disp}")
+            if c2.button("✕", key=f"{key}_rm_{i}_{n}", help="remover"):
+                ja.pop(i)
+                st.rerun()
     return ja
 
 
@@ -339,7 +332,7 @@ def main():
 
         st.markdown("**Assunto**")
         if sugerir:
-            assunto_q = ", ".join(campo_autocomplete("Assunto", "ac_assunto", assuntos_idx))
+            assunto_q = ", ".join(campo_multi("Assunto", "ac_assunto", assuntos_idx))
         else:
             assunto_q = st.text_input(
                 "Assunto", key="q_assunto", label_visibility="collapsed",
@@ -361,7 +354,7 @@ def main():
 
         st.markdown("**Pessoa (nome)**")
         if sugerir:
-            pessoa_q = ", ".join(campo_autocomplete("Pessoa", "ac_pessoa", nomes_idx))
+            pessoa_q = ", ".join(campo_multi("Pessoa", "ac_pessoa", nomes_idx))
         else:
             pessoa_q = st.text_input(
                 "Pessoa (nome)", key="q_pessoa", label_visibility="collapsed",

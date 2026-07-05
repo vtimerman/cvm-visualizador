@@ -1,4 +1,3 @@
 streamlit>=1.40
 pandas>=2.0
 requests>=2.31
-streamlit-searchbox>=0.1.20
