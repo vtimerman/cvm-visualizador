@@ -216,6 +216,20 @@ def cmd_backfill(ini=1, fim=None):
     print(f"[backfill] concluido ({feitos} ids novos).")
 
 
+def notificar_whatsapp(texto):
+    """Envia um WhatsApp via CallMeBot, se as credenciais estiverem no ambiente."""
+    phone = os.environ.get("WHATSAPP_PHONE", "")
+    apikey = os.environ.get("CALLMEBOT_APIKEY", "")
+    if not (phone and apikey):
+        return
+    try:
+        requests.get("https://api.callmebot.com/whatsapp.php",
+                     params={"phone": phone, "text": texto, "apikey": apikey},
+                     timeout=30)
+    except Exception as e:
+        print(f"  ! falha ao notificar WhatsApp: {e}", file=sys.stderr)
+
+
 def cmd_atualizar():
     con = conectar()
     m = max_valido(con)
@@ -224,12 +238,12 @@ def cmd_atualizar():
         return
     id_ = m + 1
     vazios = 0
-    novos = 0
+    novos = []
     print(f"[atualizar] a partir de {id_} (topo atual={m})")
     while vazios < 100:
         estado = coletar_um(con, id_)
         if estado == "valido":
-            novos += 1
+            novos.append(id_)
             vazios = 0
             print(f"  novo registro id={id_}")
         elif estado == "vazio":
@@ -237,8 +251,23 @@ def cmd_atualizar():
         con.commit()
         id_ += 1
         time.sleep(PAUSA)
+
+    # Notifica cada nova audiência (com trava anti-spam para cargas grandes)
+    limite = int(os.environ.get("MAX_NOTIF", "25"))
+    if 0 < len(novos) <= limite:
+        for nid in novos:
+            r = con.execute("SELECT data, hora, componente, assunto FROM audiencias "
+                            "WHERE id=?", (nid,)).fetchone()
+            msg = (f"🔔 Nova audiência CVM nº {nid}\n"
+                   f"{r[0]} {r[1]} — {r[2]}\n"
+                   f"Assunto: {r[3]}\n{BASE}{nid}")
+            notificar_whatsapp(msg)
+    elif len(novos) > limite:
+        print(f"[atualizar] {len(novos)} novos (muitos) — notificacao suprimida "
+              f"(provavel carga inicial).")
+
     con.close()
-    print(f"[atualizar] concluido ({novos} novo(s)).")
+    print(f"[atualizar] concluido ({len(novos)} novo(s)).")
 
 
 def cmd_seed_tsv(caminho):

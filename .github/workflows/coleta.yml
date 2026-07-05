@@ -38,6 +38,8 @@ jobs:
       - name: Rodar coleta
         env:
           PAUSA: "0.4"
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
         run: |
           modo="${{ github.event.inputs.modo }}"
           if [ "$modo" = "backfill" ]; then
@@ -46,6 +48,14 @@ jobs:
             python scraper.py atualizar
           fi
           python scraper.py stats
+
+      - name: Avisar falha no WhatsApp
+        if: failure()
+        run: |
+          curl -s -G "https://api.callmebot.com/whatsapp.php" \
+            --data-urlencode "phone=${{ secrets.WHATSAPP_PHONE }}" \
+            --data-urlencode "apikey=${{ secrets.CALLMEBOT_APIKEY }}" \
+            --data-urlencode "text=⚠️ Falha na coleta de Audiências CVM. Veja: https://github.com/vtimerman/cvm-visualizador/actions" || true
 
       - name: Publicar base atualizada
         run: |
