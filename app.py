@@ -437,13 +437,9 @@ def main():
 
     df = carregar()
 
-    st.title("🏛️ Audiências Particulares — CVM")
-    st.caption(f"Base local de dados públicos da CVM • {len(df):,} audiências • "
-               f"atualizada em {df['coletado_em'].max()}".replace(",", "."))
-
-    # ---- filtros (barra lateral) ----
+    # ---- filtros (barra lateral) — aplicam-se à aba Audiências ----
     with st.sidebar:
-        st.header("Filtros")
+        st.header("Filtros — Audiências")
         if st.button("🧹 Limpar filtros", use_container_width=True):
             for k in list(st.session_state.keys()):
                 if k.startswith(("f_", "q_assunto", "q_pessoa", "ac_assunto", "ac_pessoa")):
@@ -532,6 +528,9 @@ def main():
          "📋 Atas do CGE"])
 
     with aba_aud:
+        st.subheader("🏛️ Audiências Particulares — CVM")
+        st.caption(f"Base local de dados públicos da CVM • {len(df):,} audiências • "
+                   f"atualizada em {df['coletado_em'].max()}".replace(",", "."))
         c1, c2 = st.columns(2)
         c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
         c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
