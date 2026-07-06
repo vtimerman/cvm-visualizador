@@ -14,6 +14,7 @@ URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id
 PAS_DB_PATH = os.environ.get("PAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "processos.db"))
 URL_PAS = "https://sistemas.cvm.gov.br/asp/cvmwww/inqueritos/DetPasAndamentoSSI.asp?idProc="
 ATAS_DB_PATH = os.environ.get("ATAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "atas.db"))
+INF_DB_PATH = os.environ.get("INF_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "informativos.db"))
 
 st.set_page_config(page_title="Audiências CVM", page_icon="🏛️", layout="wide")
 
@@ -424,6 +425,121 @@ def render_atas():
             dialog_ata(res.iloc[sel[0]])
 
 
+def carregar_informativos():
+    if not os.path.exists(INF_DB_PATH):
+        return None
+    con = sqlite3.connect(INF_DB_PATH)
+    df = pd.read_sql("SELECT * FROM deliberacoes", con)
+    con.close()
+    df["data_dt"] = pd.to_datetime(df["data_iso"], errors="coerce")
+    return df
+
+
+@st.dialog("Deliberação do Colegiado", width="large")
+def dialog_deliberacao(row):
+    if row["link"]:
+        st.link_button("Abrir PDF do Informativo ↗", row["link"])
+    cab = f"Informativo nº {row['inf_numero']}" if str(row["inf_numero"]).strip() else "Informativo"
+    st.markdown(f"### {cab} — {row['reuniao_tipo']} — {row['data']}  ·  item {row['item']}")
+    if str(row["assunto"]).strip():
+        st.markdown(f"**Assunto:** {row['assunto']}")
+    linha = []
+    if str(row["tipo"]).strip():
+        linha.append(f"**Tipo:** {row['tipo']}")
+    if str(row["processo"]).strip():
+        linha.append(f"**Processo:** {row['processo']}")
+    if str(row["reg"]).strip():
+        linha.append(f"**Reg.:** {row['reg']}")
+    if str(row["relator"]).strip():
+        linha.append(f"**Relator:** {row['relator']}")
+    if linha:
+        st.markdown(" · ".join(linha))
+    if str(row["resumo"]).strip():
+        st.markdown(f"**Resumo (IA):** {row['resumo']}")
+    if str(row["partes"]).strip():
+        st.markdown(f"**Partes/empresas (IA):** {row['partes']}")
+    if str(row["resultado"]).strip():
+        st.markdown(f"**Resultado (IA):** {row['resultado']}")
+    if str(row["palavras_chave"]).strip():
+        st.markdown(f"**Palavras-chave:** {row['palavras_chave']}")
+    if str(row["decisao"]).strip():
+        st.markdown("**Decisão:**")
+        st.info(row["decisao"])
+    with st.expander("📄 Texto completo da deliberação"):
+        st.text(row["texto"])
+
+
+def render_informativos():
+    df = carregar_informativos()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base dos Informativos do Colegiado ainda não está disponível.")
+        return
+    com_ia = int((df["ai_feito"] == 1).sum())
+    n_inf = df["arquivo"].nunique()
+    st.caption(f"{len(df):,} deliberações de {n_inf} informativos (2017–hoje) • "
+               f"{com_ia} já com análise de IA (o resto entra conforme a rotina roda)."
+               .replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        if st.button("🧹 Limpar filtros", use_container_width=True, key="i_limpar"):
+            for k in list(st.session_state.keys()):
+                if k.startswith("i_"):
+                    del st.session_state[k]
+            st.rerun()
+        c1, c2 = st.columns([2, 1])
+        q = c1.text_input(
+            "Buscar (assunto, partes, decisão, texto…)", key="i_q",
+            help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+        tipos = sorted(t for t in df["tipo"].dropna().unique() if t)
+        f_tipo = c2.multiselect("Tipo de assunto", tipos, key="i_tipo",
+                                help="Recurso, Termo de Compromisso, Consulta, etc.")
+        c3, c4, c5 = st.columns(3)
+        proc = c3.text_input("Processo (nº)", key="i_proc",
+                             placeholder="ex.: 19957.008954 ou RJ2013")
+        rel = c4.text_input("Relator / área", key="i_rel",
+                            placeholder="ex.: SIN, SRE, DHM")
+        anos = sorted((df["data_dt"].dropna().dt.year.unique()), reverse=True)
+        f_anos = c5.multiselect("Ano", [int(a) for a in anos], key="i_anos")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        m &= match_busca(df, ["assunto", "texto", "resumo", "partes", "decisao",
+                              "palavras_chave", "processo"], q)
+    if f_tipo:
+        m &= df["tipo"].isin(f_tipo)
+    if proc.strip():
+        m &= df["processo"].fillna("").str.lower().str.contains(
+            re.escape(proc.lower().strip()), na=False)
+    if rel.strip():
+        m &= df["relator"].fillna("").str.lower().str.contains(
+            re.escape(rel.lower().strip()), na=False)
+    if f_anos:
+        m &= df["data_dt"].dt.year.isin(f_anos)
+    res = df[m].sort_values(["data_iso", "item"],
+                            ascending=[False, True]).reset_index(drop=True)
+    c1, c2 = st.columns(2)
+    c1.metric("Deliberações encontradas", f"{len(res):,}".replace(",", "."))
+    c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
+    cols = ["data", "inf_numero", "item", "tipo", "assunto", "relator",
+            "processo", "link"]
+    show = res[cols].rename(columns={
+        "data": "Data", "inf_numero": "Informativo", "item": "Item",
+        "tipo": "Tipo", "assunto": "Assunto", "relator": "Relator",
+        "processo": "Processo", "link": "Link"})
+    st.caption("👆 Clique numa linha para ver a deliberação completa (assunto, "
+               "decisão, análise de IA e texto).")
+    ev = st.dataframe(
+        show, use_container_width=True, hide_index=True, height=460,
+        on_select="rerun", selection_mode="single-row",
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="PDF ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="informativos_colegiado.csv", mime="text/csv")
+    sel = ev.selection.rows if getattr(ev, "selection", None) else []
+    if sel:
+        did = int(res.iloc[sel[0]]["id"])
+        if did != st.session_state.get("dlg_delib"):
+            st.session_state["dlg_delib"] = did
+            dialog_deliberacao(res.iloc[sel[0]])
+
+
 def render_filtros_aud(df):
     """Filtros da aba Audiências — renderiza no container atual e retorna os valores."""
     if st.button("🧹 Limpar filtros", use_container_width=True):
@@ -505,9 +621,9 @@ def main():
     if not autenticado():
         return
 
-    aba_aud, aba_pas, aba_atas = st.tabs(
+    aba_aud, aba_pas, aba_atas, aba_inf = st.tabs(
         ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
-         "📋 Atas do CGE"])
+         "📋 Atas do CGE", "📰 Informativos do Colegiado"])
 
     with aba_aud:
         if not os.path.exists(DB_PATH):
@@ -575,6 +691,10 @@ def main():
 
     with aba_atas:
         render_atas()
+
+    with aba_inf:
+        st.subheader("📰 Informativos do Colegiado — CVM")
+        render_informativos()
 
 
 if __name__ == "__main__":

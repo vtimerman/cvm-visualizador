@@ -5,3 +5,5 @@ __pycache__/
 .lock
 atas_pdf/
 atas_txt/
+informativos_pdf/
+informativos_txt/
