@@ -15,6 +15,7 @@ PAS_DB_PATH = os.environ.get("PAS_DB_PATH", os.path.join(os.path.dirname(os.path
 URL_PAS = "https://sistemas.cvm.gov.br/asp/cvmwww/inqueritos/DetPasAndamentoSSI.asp?idProc="
 ATAS_DB_PATH = os.environ.get("ATAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "atas.db"))
 INF_DB_PATH = os.environ.get("INF_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "informativos.db"))
+TERMOS_DB_PATH = os.environ.get("TERMOS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "termos.db"))
 
 st.set_page_config(page_title="Audiências CVM", page_icon="🏛️", layout="wide")
 
@@ -292,6 +293,36 @@ def dialog_processo(row, acus):
         rel_html = ('<h3>Relatoria (Informativos do Colegiado)</h3>'
                     '<p style="font-size:13px">— ainda sem relator identificado nos '
                     'informativos para este processo —</p>')
+    # Termo de Compromisso (portais de TC)
+    tc = carregar_termos()
+    tc_rows = ""
+    if tc is not None:
+        tcm = tc[tc["proc_norm"] == _norm_proc(row["numero"])]
+        for _, x in tcm.iterrows():
+            tc_rows += (f'<tr><td>{e(x["situacao"])}</td><td>{e(x["data_decisao"])}</td>'
+                        f'<td>{e(x["data_assinatura"])}</td><td>{e(x["partes"])}</td></tr>')
+    tc_html = (
+        '<h3>Termo de Compromisso</h3>'
+        + ('<table><tr class="header"><td>Situação</td><td>Decisão</td>'
+           f'<td>Assinatura</td><td>Compromitentes/Proponentes</td></tr>{tc_rows}</table>'
+           if tc_rows else
+           '<p style="font-size:13px">— sem termo de compromisso registrado —</p>'))
+    # Despachos/audiências relacionados (cruzamento por nº, tolera parcial)
+    desp = despachos_do_processo(row["numero"])
+    if desp:
+        dr = "".join(
+            f'<tr><td style="white-space:nowrap">{e(d["data"])}</td>'
+            f'<td>{e(d["componente"])}</td><td>{e(d["solicitante"])}</td>'
+            f'<td>{e(d["assunto"])}</td></tr>' for d in desp[:40])
+        desp_html = (
+            f'<h3>Despachos/audiências relacionados ({len(desp)})</h3>'
+            '<p style="font-size:12px">Cruzados pelo número do processo (tolera '
+            'número parcial citado no despacho).</p>'
+            '<table><tr class="header"><td>Data</td><td>Componente</td>'
+            f'<td>Solicitante</td><td>Assunto</td></tr>{dr}</table>')
+    else:
+        desp_html = ('<h3>Despachos/audiências relacionados</h3>'
+                     '<p style="font-size:13px">— nenhum despacho relacionado —</p>')
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
@@ -301,8 +332,9 @@ def dialog_processo(row, acus):
         f'<h3>Acusados ({len(ac)})</h3>'
         '<table><tr class="header"><td>Nome/Razão social</td><td>Situação</td>'
         f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
-        f'{rel_html}</div></body></html>')
-    components.html(doc, height=560 + len(ac) * 70 + len(hist) * 34, scrolling=True)
+        f'{rel_html}{tc_html}{desp_html}</div></body></html>')
+    components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
+                    + len(desp[:40]) * 34, scrolling=True)
 
 
 def render_processos():
@@ -342,25 +374,28 @@ def render_processos():
         m &= proc["idproc"].isin(set(acus[mk]["idproc"]))
 
     res = proc[m].sort_values("idproc", ascending=False).reset_index(drop=True)
-    # cruza o relator atual (última atribuição registrada nos Informativos)
+    # cruzamentos: relator atual (Informativos) e situação do Termo de Compromisso
     mapa_rel = mapa_relator_atual()
+    m_tc = mapa_tc()
     res["relator_atual"] = res["numero"].map(
         lambda n: mapa_rel.get(_norm_proc(n), ("",))[0])
+    res["tc"] = res["numero"].map(lambda n: m_tc.get(_norm_proc(n), ""))
     st.metric("Processos encontrados", f"{len(res):,}".replace(",", "."))
     ncruz = int((res["relator_atual"] != "").sum())
     if len(mapa_rel):
-        st.caption(f"🧭 Relator cruzado dos Informativos do Colegiado em "
-                   f"{ncruz} dos {len(res)} processos exibidos (a cobertura cresce "
-                   "conforme a base de sancionadores e os informativos avançam).")
+        st.caption(f"🧭 Relator cruzado dos Informativos em {ncruz} dos {len(res)} "
+                   "processos · TC cruzado dos portais de Termos de Compromisso · "
+                   "despachos relacionados aparecem no detalhe (a cobertura cresce "
+                   "conforme as bases avançam).")
 
     cols = ["numero", "data_abertura", "fase", "encarregado", "relator_atual",
-            "acusados", "link"]
+            "tc", "acusados", "link"]
     show = res[cols].rename(columns={
         "numero": "Processo", "data_abertura": "Abertura", "fase": "Fase",
-        "encarregado": "Encarregado", "relator_atual": "Relator (informativos)",
-        "acusados": "Acusados", "link": "Link"})
-    st.caption("👆 Clique numa linha para ver o processo, os acusados e o histórico "
-               "de relatoria.")
+        "encarregado": "Encarregado", "relator_atual": "Relator (inform.)",
+        "tc": "Termo Compr.", "acusados": "Acusados", "link": "Link"})
+    st.caption("👆 Clique numa linha para ver acusados, relatoria, Termo de "
+               "Compromisso e despachos relacionados.")
     ev = st.dataframe(
         show, use_container_width=True, hide_index=True, height=460,
         on_select="rerun", selection_mode="single-row",
@@ -575,6 +610,214 @@ def _norm_proc(p):
     m = re.search(r"1\d{4}\.\d{6}/\d{4}-\d{2}|RJ\s?\d{4}/\d{3,6}|"
                   r"SP\s?\d{4}/\d{3,6}|\d{1,4}/\d{4}", str(p))
     return re.sub(r"\s+", "", m.group(0)).upper() if m else ""
+
+
+def _sigs_processo(texto):
+    """Assinaturas (sequencia, ano) de um nº de processo, tolerando nº PARCIAL.
+
+    Nos despachos a CVM às vezes cita só um pedaço do número; então casamos pela
+    sequência distintiva (sem o código de unidade 19957, que é comum a todos) mais
+    o ano, aceitando ano ausente de um dos lados.
+    """
+    if not texto:
+        return set()
+    s = str(texto)
+    sigs = set()
+    # SEI completo/parcial: 19957.011547/2017-16  ou  19957.011547
+    for m in re.finditer(r"1\d{4}\.(\d{4,6})(?:/(\d{4}))?", s):
+        sigs.add((m.group(1).lstrip("0") or m.group(1), m.group(2) or ""))
+    # RJ / SP: RJ2013/5638 , TA-RJ2002/1153
+    for m in re.finditer(r"(?:RJ|SP)\s?(\d{4})/(\d{3,6})", s, re.I):
+        sigs.add((m.group(2).lstrip("0") or m.group(2), m.group(1)))
+    # antigo com ponto: 2002.6691
+    for m in re.finditer(r"\b(19|20)(\d{2})\.(\d{3,4})\b", s):
+        sigs.add((m.group(3).lstrip("0") or m.group(3), m.group(1) + m.group(2)))
+    # generico NNNN/YYYY (malandragem: pedaço + ano)
+    for m in re.finditer(r"\b(\d{3,6})/(\d{4})\b", s):
+        if 1990 <= int(m.group(2)) <= 2035:
+            sigs.add((m.group(1).lstrip("0") or m.group(1), m.group(2)))
+    return {(seq, ano) for seq, ano in sigs if len(seq) >= 3}
+
+
+@st.cache_data(ttl=300)
+def indice_despachos():
+    """Índice seq -> lista de (ano, despacho) para cruzar processos com despachos."""
+    df = carregar()
+    idx = {}
+    for _, r in df.iterrows():
+        campo = f"{r.get('assunto', '')} {r.get('observacoes', '')}"
+        rec = {"id": int(r["id"]), "data": r.get("data", ""),
+               "componente": r.get("componente", ""),
+               "solicitante": r.get("solicitante_nome", ""),
+               "assunto": r.get("assunto", ""), "status": r.get("status", ""),
+               "link": r.get("link", "")}
+        for seq, ano in _sigs_processo(campo):
+            idx.setdefault(seq, []).append((ano, rec))
+    return idx
+
+
+def despachos_do_processo(processo):
+    """Despachos (audiências) cujo assunto referencia este processo (mesmo parcial)."""
+    idx = indice_despachos()
+    if not idx:
+        return []
+    vistos, out = set(), []
+    for seq, ano_q in _sigs_processo(processo):
+        for ano_d, rec in idx.get(seq, []):
+            # ano deve bater; se um dos lados não tem ano, exige seq >= 4 dígitos
+            ok = (ano_q and ano_d and ano_q == ano_d) or \
+                 ((not ano_q or not ano_d) and len(seq) >= 4)
+            if ok and rec["id"] not in vistos:
+                vistos.add(rec["id"])
+                out.append(rec)
+    return sorted(out, key=lambda r: r["id"])
+
+
+@st.cache_data(ttl=300)
+def carregar_termos():
+    if not os.path.exists(TERMOS_DB_PATH):
+        return None
+    con = sqlite3.connect(TERMOS_DB_PATH)
+    df = pd.read_sql("SELECT * FROM termos", con)
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def mapa_tc():
+    """proc_norm -> 'Aceito' / 'Rejeitado' / 'Aceito+Rejeitado' (situações do TC)."""
+    df = carregar_termos()
+    if df is None or len(df) == 0:
+        return {}
+    out = {}
+    for pn, g in df[df["proc_norm"] != ""].groupby("proc_norm"):
+        sits = sorted(set(g["situacao"]))
+        out[pn] = "+".join(sits)
+    return out
+
+
+def deliberacoes_tc(proc_norm):
+    """Deliberações de Termo de Compromisso nos Informativos para este processo."""
+    if not proc_norm or not os.path.exists(INF_DB_PATH):
+        return []
+    con = sqlite3.connect(INF_DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT data,inf_numero,assunto,resumo,decisao,link FROM deliberacoes "
+            "WHERE proc_norm=? AND tipo='Termo de Compromisso' ORDER BY data_iso",
+            (proc_norm,)).fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    return rows
+
+
+@st.dialog("Termo de Compromisso", width="large")
+def dialog_termo(row):
+    pn = row["proc_norm"]
+    badge = "✅ Aceito" if row["situacao"] == "Aceito" else "❌ Rejeitado"
+    st.markdown(f"### Processo {row['processo']} — {badge}")
+    linha = [f"**Decisão:** {row['data_decisao']}"]
+    if str(row["data_assinatura"]).strip():
+        linha.append(f"**Assinatura:** {row['data_assinatura']}")
+    if str(row["data_publicacao"]).strip():
+        linha.append(f"**Publicação:** {row['data_publicacao']}")
+    if str(row["data_arquivamento"]).strip():
+        linha.append(f"**Arquivamento:** {row['data_arquivamento']}")
+    st.markdown(" · ".join(linha))
+    if str(row["partes"]).strip():
+        st.markdown(f"**Compromitentes/Proponentes:** {row['partes']}")
+    if row["link"]:
+        st.link_button("Abrir Decisão/Parecer do Colegiado ↗", row["link"])
+    rel = mapa_relator_atual().get(pn)
+    if rel:
+        st.markdown(f"**Relator (informativos):** {rel[0]} (desde {rel[1]})")
+    delibs = deliberacoes_tc(pn)
+    if delibs:
+        st.markdown("#### 📰 Deliberação(ões) do Colegiado (Informativos)")
+        for data, inf, assunto, resumo, decisao, link in delibs:
+            st.markdown(f"**{data}** — Informativo nº {inf}")
+            if str(resumo).strip():
+                st.markdown(f"**Resumo (IA):** {resumo}")
+            elif str(assunto).strip():
+                st.markdown(f"*{assunto}*")
+            if str(decisao).strip():
+                st.info(decisao)
+    desp = despachos_do_processo(row["processo"])
+    if desp:
+        st.markdown(f"#### 🏛️ Despachos/audiências relacionados ({len(desp)})")
+        st.caption("Cruzamento pelo número do processo (tolera número parcial).")
+        for d in desp[:30]:
+            st.markdown(f"- **{d['data']}** · {d['componente']} · "
+                        f"{d['solicitante']} — {d['assunto']}  "
+                        f"[abrir ↗]({d['link']})")
+
+
+def render_termos():
+    df = carregar_termos()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base de Termos de Compromisso ainda não está disponível.")
+        return
+    na = int((df["situacao"] == "Aceito").sum())
+    nr = int((df["situacao"] == "Rejeitado").sum())
+    st.caption(f"{len(df):,} termos de compromisso consolidados • {na} aceitos • "
+               f"{nr} rejeitados (fonte: portais de TC da CVM)."
+               .replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        if st.button("🧹 Limpar filtros", use_container_width=True, key="tc_limpar"):
+            for k in list(st.session_state.keys()):
+                if k.startswith("tc_"):
+                    del st.session_state[k]
+            st.rerun()
+        c1, c2 = st.columns([2, 1])
+        q = c1.text_input("Buscar (nº do processo, compromitente/proponente)",
+                          key="tc_q",
+                          help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+        f_sit = c2.multiselect("Situação", ["Aceito", "Rejeitado"], key="tc_sit")
+        c3, c4 = st.columns(2)
+        anos = sorted({int(a[-4:]) for a in df["data_decisao"].dropna()
+                       if re.search(r"\d{4}$", str(a))}, reverse=True)
+        f_anos = c3.multiselect("Ano da decisão", anos, key="tc_anos")
+        so_desp = c4.checkbox("Só com despacho/audiência cruzado", key="tc_desp",
+                              help="Mostra apenas TCs com audiência particular relacionada.")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        m &= match_busca(df, ["processo", "partes"], q)
+    if f_sit:
+        m &= df["situacao"].isin(f_sit)
+    if f_anos:
+        m &= df["data_decisao"].apply(
+            lambda a: bool(re.search(r"\d{4}$", str(a)))
+            and int(str(a)[-4:]) in f_anos)
+    res = df[m].copy()
+    if so_desp:
+        res = res[res["processo"].apply(lambda p: len(despachos_do_processo(p)) > 0)]
+    res = res.sort_values("data_decisao_iso", ascending=False).reset_index(drop=True)
+    c1, c2 = st.columns(2)
+    c1.metric("Termos encontrados", f"{len(res):,}".replace(",", "."))
+    c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
+    cols = ["processo", "situacao", "data_decisao", "data_assinatura",
+            "data_publicacao", "data_arquivamento", "partes", "link"]
+    show = res[cols].rename(columns={
+        "processo": "Processo", "situacao": "Situação", "data_decisao": "Decisão",
+        "data_assinatura": "Assinatura", "data_publicacao": "Publicação",
+        "data_arquivamento": "Arquivamento", "partes": "Compromitentes/Proponentes",
+        "link": "Decisão/Parecer"})
+    st.caption("👆 Clique numa linha para ver o TC, a deliberação do Colegiado e "
+               "os despachos relacionados.")
+    ev = st.dataframe(
+        show, use_container_width=True, hide_index=True, height=460,
+        on_select="rerun", selection_mode="single-row",
+        column_config={"Decisão/Parecer": st.column_config.LinkColumn(
+            "Decisão/Parecer", display_text="abrir ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="termos_compromisso.csv", mime="text/csv")
+    sel = ev.selection.rows if getattr(ev, "selection", None) else []
+    if sel:
+        tid = int(res.iloc[sel[0]]["id"])
+        if tid != st.session_state.get("dlg_tc"):
+            st.session_state["dlg_tc"] = tid
+            dialog_termo(res.iloc[sel[0]])
 
 
 @st.cache_data(ttl=300)
@@ -817,10 +1060,10 @@ def main():
     if not autenticado():
         return
 
-    aba_aud, aba_pas, aba_ns, aba_atas, aba_inf = st.tabs(
+    aba_aud, aba_pas, aba_tc, aba_ns, aba_atas, aba_inf = st.tabs(
         ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
-         "📂 Processos Não-Sancionadores", "📋 Atas do CGE",
-         "📰 Informativos do Colegiado"])
+         "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
+         "📋 Atas do CGE", "📰 Informativos do Colegiado"])
 
     with aba_aud:
         if not os.path.exists(DB_PATH):
@@ -885,6 +1128,10 @@ def main():
 
     with aba_pas:
         render_processos()
+
+    with aba_tc:
+        st.subheader("🤝 Termos de Compromisso — CVM")
+        render_termos()
 
     with aba_ns:
         st.subheader("📂 Processos Não-Sancionadores — CVM")
