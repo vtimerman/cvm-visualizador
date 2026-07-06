@@ -275,6 +275,23 @@ def dialog_processo(row, acus):
         f'<td>{e(a["data"])}</td><td>{e(a["historico"])}</td></tr>'
         for _, a in ac.iterrows()) if len(ac) else \
         '<tr><td colspan="4">— sem acusados —</td></tr>'
+    # histórico de relatoria cruzado dos Informativos do Colegiado
+    hist = historico_relator(_norm_proc(row["numero"]))
+    if hist:
+        rel_rows = "".join(
+            f'<tr><td>{e(d)}</td><td>{e(rel)}</td><td>{e(ev)}</td>'
+            f'<td>Informativo nº {e(inf)}</td></tr>' for d, rel, ev, inf in hist)
+        atual = hist[-1]
+        rel_html = (
+            f'<h3>Relatoria (Informativos do Colegiado)</h3>'
+            f'<p style="font-size:13px">Relator na última atribuição registrada: '
+            f'<b>{e(atual[1])}</b> (em {e(atual[0])}).</p>'
+            '<table><tr class="header"><td>Data</td><td>Relator</td>'
+            f'<td>Evento</td><td>Fonte</td></tr>{rel_rows}</table>')
+    else:
+        rel_html = ('<h3>Relatoria (Informativos do Colegiado)</h3>'
+                    '<p style="font-size:13px">— ainda sem relator identificado nos '
+                    'informativos para este processo —</p>')
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
@@ -284,8 +301,8 @@ def dialog_processo(row, acus):
         f'<h3>Acusados ({len(ac)})</h3>'
         '<table><tr class="header"><td>Nome/Razão social</td><td>Situação</td>'
         f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
-        '</div></body></html>')
-    components.html(doc, height=520 + len(ac) * 70, scrolling=True)
+        f'{rel_html}</div></body></html>')
+    components.html(doc, height=560 + len(ac) * 70 + len(hist) * 34, scrolling=True)
 
 
 def render_processos():
@@ -325,13 +342,25 @@ def render_processos():
         m &= proc["idproc"].isin(set(acus[mk]["idproc"]))
 
     res = proc[m].sort_values("idproc", ascending=False).reset_index(drop=True)
+    # cruza o relator atual (última atribuição registrada nos Informativos)
+    mapa_rel = mapa_relator_atual()
+    res["relator_atual"] = res["numero"].map(
+        lambda n: mapa_rel.get(_norm_proc(n), ("",))[0])
     st.metric("Processos encontrados", f"{len(res):,}".replace(",", "."))
+    ncruz = int((res["relator_atual"] != "").sum())
+    if len(mapa_rel):
+        st.caption(f"🧭 Relator cruzado dos Informativos do Colegiado em "
+                   f"{ncruz} dos {len(res)} processos exibidos (a cobertura cresce "
+                   "conforme a base de sancionadores e os informativos avançam).")
 
-    cols = ["numero", "data_abertura", "fase", "encarregado", "acusados", "link"]
+    cols = ["numero", "data_abertura", "fase", "encarregado", "relator_atual",
+            "acusados", "link"]
     show = res[cols].rename(columns={
         "numero": "Processo", "data_abertura": "Abertura", "fase": "Fase",
-        "encarregado": "Encarregado", "acusados": "Acusados", "link": "Link"})
-    st.caption("👆 Clique numa linha para ver o processo e os acusados (com histórico).")
+        "encarregado": "Encarregado", "relator_atual": "Relator (informativos)",
+        "acusados": "Acusados", "link": "Link"})
+    st.caption("👆 Clique numa linha para ver o processo, os acusados e o histórico "
+               "de relatoria.")
     ev = st.dataframe(
         show, use_container_width=True, hide_index=True, height=460,
         on_select="rerun", selection_mode="single-row",
@@ -540,6 +569,173 @@ def render_informativos():
             dialog_deliberacao(res.iloc[sel[0]])
 
 
+def _norm_proc(p):
+    if not p:
+        return ""
+    m = re.search(r"1\d{4}\.\d{6}/\d{4}-\d{2}|RJ\s?\d{4}/\d{3,6}|"
+                  r"SP\s?\d{4}/\d{3,6}|\d{1,4}/\d{4}", str(p))
+    return re.sub(r"\s+", "", m.group(0)).upper() if m else ""
+
+
+@st.cache_data(ttl=300)
+def carregar_relatores():
+    if not os.path.exists(INF_DB_PATH):
+        return None
+    con = sqlite3.connect(INF_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM relatores", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def mapa_relator_atual():
+    """proc_norm -> (relator, data, data_iso, n_eventos) do evento mais recente."""
+    df = carregar_relatores()
+    if df is None or len(df) == 0:
+        return {}
+    d = df.sort_values("data_iso")
+    out = {}
+    for pn, g in d.groupby("proc_norm"):
+        last = g.iloc[-1]
+        out[pn] = (last["relator"], last["data"], last["data_iso"], len(g))
+    return out
+
+
+def historico_relator(proc_norm):
+    """Lista de eventos (data, relator, evento, informativo) de um processo."""
+    df = carregar_relatores()
+    if df is None or not proc_norm:
+        return []
+    g = df[df["proc_norm"] == proc_norm].sort_values("data_iso")
+    return [(r["data"], r["relator"], r["evento"], r["inf_numero"])
+            for _, r in g.iterrows()]
+
+
+@st.cache_data(ttl=300)
+def agregar_nao_sancionadores():
+    """Uma linha por processo não-sancionador, agregando todas as deliberações."""
+    df = carregar_informativos()
+    if df is None or len(df) == 0:
+        return None
+    ns = df[df["natureza"] == "Nao-sancionador"].copy()
+    if len(ns) == 0:
+        return ns
+    ns["chave"] = ns.apply(
+        lambda r: r["proc_norm"] if r["proc_norm"] else f"__id{r['id']}", axis=1)
+    campos = ["assunto", "texto", "resumo", "partes", "decisao",
+              "palavras_chave", "relator", "tipo"]
+    linhas = []
+    for chave, g in ns.sort_values("data_iso").groupby("chave"):
+        last = g.iloc[-1]
+        tipos = " · ".join(sorted({t for t in g["tipo"] if t}))
+        areas = " · ".join(sorted({a for a in g["relator"] if a}))
+        blob = " ".join(g[campos].fillna("").astype(str).values.ravel()).lower()
+        anos = sorted({int(a) for a in
+                       pd.to_datetime(g["data_iso"], errors="coerce").dt.year.dropna()})
+        linhas.append({
+            "chave": chave,
+            "processo": last["processo"] if str(last["processo"]).strip() else "(sem número)",
+            "tipos": tipos, "assunto": last["assunto"], "area": areas,
+            "n": len(g), "primeira": g.iloc[0]["data"], "ultima": last["data"],
+            "ultima_iso": last["data_iso"], "link": last["link"],
+            "_blob": blob, "_anos": anos})
+    return pd.DataFrame(linhas)
+
+
+@st.dialog("Processo não-sancionador", width="large")
+def dialog_ns(chave, processo):
+    df = carregar_informativos()
+    g = df[(df["natureza"] == "Nao-sancionador")].copy()
+    g["chave"] = g.apply(
+        lambda r: r["proc_norm"] if r["proc_norm"] else f"__id{r['id']}", axis=1)
+    g = g[g["chave"] == chave].sort_values(["data_iso", "item"])
+    st.markdown(f"### Processo {processo}")
+    tipos = sorted({t for t in g["tipo"] if t})
+    areas = sorted({a for a in g["relator"] if a})
+    meta = []
+    if tipos:
+        meta.append("**Tipo(s):** " + " · ".join(tipos))
+    if areas:
+        meta.append("**Área/relator:** " + " · ".join(areas))
+    meta.append(f"**Decisões registradas:** {len(g)}")
+    st.markdown("  \n".join(meta))
+    st.markdown("#### 🗂️ Linha do tempo das decisões")
+    for _, r in g.iterrows():
+        titulo = f"**{r['data']}** — Informativo nº {r['inf_numero']}, item {r['item']} · {r['tipo']}"
+        st.markdown(titulo)
+        if str(r["assunto"]).strip():
+            st.markdown(f"*{r['assunto']}*")
+        if str(r["resumo"]).strip():
+            st.markdown(f"**Resumo (IA):** {r['resumo']}")
+        if str(r["decisao"]).strip():
+            st.info(r["decisao"])
+        if r["link"]:
+            st.caption(f"[Abrir PDF do informativo ↗]({r['link']})")
+        st.divider()
+
+
+def render_nao_sancionadores():
+    ag = agregar_nao_sancionadores()
+    if ag is None or len(ag) == 0:
+        st.info("⏳ A base de Informativos ainda não está disponível.")
+        return
+    st.caption(f"{len(ag):,} processos não-sancionadores (recursos, consultas, "
+               "ofertas, normas, propostas…) consolidados dos Informativos do "
+               "Colegiado. Uma linha por processo; clique para ver a linha do tempo."
+               .replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        if st.button("🧹 Limpar filtros", use_container_width=True, key="ns_limpar"):
+            for k in list(st.session_state.keys()):
+                if k.startswith("ns_"):
+                    del st.session_state[k]
+            st.rerun()
+        c1, c2 = st.columns([2, 1])
+        q = c1.text_input("Buscar (nº, assunto, área, decisão, texto…)", key="ns_q",
+                          help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+        tipos_disp = sorted({t for ts in ag["tipos"] for t in ts.split(" · ") if t})
+        f_tipo = c2.multiselect("Tipo", tipos_disp, key="ns_tipo")
+        c3, c4 = st.columns(2)
+        area = c3.text_input("Área / relator", key="ns_area",
+                             placeholder="ex.: SIN, SRE, SNC")
+        anos_disp = sorted({a for ans in ag["_anos"] for a in ans}, reverse=True)
+        f_anos = c4.multiselect("Ano", anos_disp, key="ns_anos")
+    m = pd.Series(True, index=ag.index)
+    if q.strip():
+        m &= match_busca(ag, ["_blob"], q)
+    if f_tipo:
+        m &= ag["tipos"].apply(lambda s: any(t in s for t in f_tipo))
+    if area.strip():
+        m &= ag["area"].str.lower().str.contains(re.escape(area.lower().strip()), na=False)
+    if f_anos:
+        m &= ag["_anos"].apply(lambda a: any(y in a for y in f_anos))
+    res = ag[m].sort_values("ultima_iso", ascending=False).reset_index(drop=True)
+    c1, c2 = st.columns(2)
+    c1.metric("Processos encontrados", f"{len(res):,}".replace(",", "."))
+    c2.metric("Total na base", f"{len(ag):,}".replace(",", "."))
+    cols = ["processo", "tipos", "assunto", "area", "n", "primeira", "ultima", "link"]
+    show = res[cols].rename(columns={
+        "processo": "Processo", "tipos": "Tipo(s)", "assunto": "Assunto (último)",
+        "area": "Área/Relator", "n": "Nº decisões", "primeira": "1ª decisão",
+        "ultima": "Última", "link": "Link"})
+    st.caption("👆 Clique numa linha para ver a linha do tempo completa do processo.")
+    ev = st.dataframe(
+        show, use_container_width=True, hide_index=True, height=460,
+        on_select="rerun", selection_mode="single-row",
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="PDF ↗")})
+    st.download_button("⬇️ Baixar (CSV)",
+                       show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="nao_sancionadores.csv", mime="text/csv")
+    sel = ev.selection.rows if getattr(ev, "selection", None) else []
+    if sel:
+        chave = res.iloc[sel[0]]["chave"]
+        if chave != st.session_state.get("dlg_ns"):
+            st.session_state["dlg_ns"] = chave
+            dialog_ns(chave, res.iloc[sel[0]]["processo"])
+
+
 def render_filtros_aud(df):
     """Filtros da aba Audiências — renderiza no container atual e retorna os valores."""
     if st.button("🧹 Limpar filtros", use_container_width=True):
@@ -621,9 +817,10 @@ def main():
     if not autenticado():
         return
 
-    aba_aud, aba_pas, aba_atas, aba_inf = st.tabs(
+    aba_aud, aba_pas, aba_ns, aba_atas, aba_inf = st.tabs(
         ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
-         "📋 Atas do CGE", "📰 Informativos do Colegiado"])
+         "📂 Processos Não-Sancionadores", "📋 Atas do CGE",
+         "📰 Informativos do Colegiado"])
 
     with aba_aud:
         if not os.path.exists(DB_PATH):
@@ -688,6 +885,10 @@ def main():
 
     with aba_pas:
         render_processos()
+
+    with aba_ns:
+        st.subheader("📂 Processos Não-Sancionadores — CVM")
+        render_nao_sancionadores()
 
     with aba_atas:
         render_atas()

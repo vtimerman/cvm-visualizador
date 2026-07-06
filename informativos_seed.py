@@ -63,6 +63,32 @@ RE_PROC = re.compile(
 RE_REG = re.compile(r"Reg\.?\s*n?[ºo°]?\s*([\d./]+)", re.I)
 RE_REL = re.compile(r"Relator[a]?:?\s*([^\n]{1,80})", re.I)
 
+# tipos de deliberacao que sao, por natureza, de processo sancionador (PAS)
+TIPOS_SANC = {"Julgamento/PAS", "Termo de Compromisso", "Pedido de Anulação"}
+# sigla de relator = Presidente ou Diretor (relatam PAS)
+RE_DIRETOR = re.compile(r"^(PTE|D[A-Z]{1,3})$")
+# bloco de sorteio/redistribuicao: Reg. NNNN/YY - <processo> (..) - <SIGLA DIRETOR>
+RE_SORTEIO = re.compile(
+    r"Reg\.?\s*n?[ºo°]?\s*(\d{3,4}/\d{2})\s*[-–]\s*"
+    r"(1\d{4}\.\d{6}/\d{4}-\d{2}|RJ\s?\d{4}/\d{3,6}|\d{2,4}/\d{4})"
+    r"\s*(?:\([^)]*\)\s*)*[-–]\s*([A-Z]{2,4})\b")
+
+
+def norm_proc(p):
+    """Normaliza um numero de processo para chave de cruzamento."""
+    if not p:
+        return ""
+    m = re.search(r"1\d{4}\.\d{6}/\d{4}-\d{2}|RJ\s?\d{4}/\d{3,6}|"
+                  r"SP\s?\d{4}/\d{3,6}|\d{1,4}/\d{4}", p)
+    return re.sub(r"\s+", "", m.group(0)).upper() if m else ""
+
+
+def natureza_de(tipo, relator):
+    sigla = (relator or "").split("/")[0].strip().upper()
+    if tipo in TIPOS_SANC or RE_DIRETOR.match(sigla):
+        return "Sancionador"
+    return "Nao-sancionador"
+
 
 def conectar():
     con = sqlite3.connect(DB_PATH)
@@ -71,10 +97,22 @@ def conectar():
         arquivo TEXT, inf_numero TEXT, reuniao_tipo TEXT,
         data TEXT, data_iso TEXT,
         item TEXT, tipo TEXT, assunto TEXT, processo TEXT, reg TEXT, relator TEXT,
-        decisao TEXT, texto TEXT, link TEXT,
+        decisao TEXT, texto TEXT, link TEXT, natureza TEXT, proc_norm TEXT,
         resumo TEXT, palavras_chave TEXT, partes TEXT, resultado TEXT,
         ai_feito INTEGER DEFAULT 0, coletado_em TEXT,
         UNIQUE(arquivo, item))""")
+    # migracao: adiciona colunas novas se a base ja existia sem elas
+    for col, tipo_sql in [("natureza", "TEXT"), ("proc_norm", "TEXT")]:
+        try:
+            con.execute(f"ALTER TABLE deliberacoes ADD COLUMN {col} {tipo_sql}")
+        except sqlite3.OperationalError:
+            pass
+    # eventos de relatoria (sorteios/redistribuicoes + julgamentos por diretor)
+    con.execute("""CREATE TABLE IF NOT EXISTS relatores(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proc_norm TEXT, processo TEXT, reg TEXT, relator TEXT, evento TEXT,
+        arquivo TEXT, inf_numero TEXT, data TEXT, data_iso TEXT,
+        UNIQUE(proc_norm, arquivo, relator, evento))""")
     con.commit()
     return con
 
@@ -173,11 +211,21 @@ def extrair_campos(corpo_item):
     return tipo, assunto, processo, reg, relator, decisao
 
 
+def eventos_sorteio(texto):
+    """Extrai (reg, processo, sigla_diretor) dos blocos de sorteio/redistribuicao."""
+    out = []
+    for reg, proc, sigla in RE_SORTEIO.findall(texto):
+        if RE_DIRETOR.match(sigla):
+            out.append((reg, re.sub(r"\s+", "", proc), sigla))
+    return out
+
+
 def construir():
     con = conectar()
     links = mapa_links()
     hoje = dt.date.today().isoformat()
-    n_arq = n_del = 0
+    con.execute("DELETE FROM relatores")  # reconstroi o mapa de relatoria por completo
+    n_arq = n_del = n_rel = 0
     for txt in sorted(glob.glob(os.path.join(TXT_DIR, "*.txt"))):
         base = os.path.splitext(os.path.basename(txt))[0]
         texto = open(txt, encoding="utf-8").read()
@@ -185,8 +233,28 @@ def construir():
         link = links.get(base, "")
         itens = fatiar(texto)
         n_arq += 1
+        # eventos de relatoria: sorteios/redistribuicoes (topo do informativo)
+        for reg, proc, sigla in eventos_sorteio(texto):
+            pn = norm_proc(proc)
+            if not pn:
+                continue
+            con.execute("""INSERT OR IGNORE INTO relatores(
+                proc_norm,processo,reg,relator,evento,arquivo,inf_numero,data,data_iso)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (pn, proc, reg, sigla, "sorteio/redistribuicao", base, inf_num,
+                 data, data_iso))
+            n_rel += con.total_changes and 1 or 0
         for item, corpo in itens:
             tipo, assunto, processo, reg, relator, decisao = extrair_campos(corpo)
+            natureza = natureza_de(tipo, relator)
+            pn = norm_proc(processo)
+            # julgamento/anulacao relatado por diretor tambem e' evento de relatoria
+            sigla = (relator or "").split("/")[0].strip().upper()
+            if pn and RE_DIRETOR.match(sigla):
+                con.execute("""INSERT OR IGNORE INTO relatores(
+                    proc_norm,processo,reg,relator,evento,arquivo,inf_numero,
+                    data,data_iso) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (pn, processo, reg, sigla, tipo, base, inf_num, data, data_iso))
             # preserva IA existente
             row = con.execute("SELECT resumo,palavras_chave,partes,resultado,ai_feito "
                               "FROM deliberacoes WHERE arquivo=? AND item=?",
@@ -194,29 +262,34 @@ def construir():
             res, pc, pa, rs, ai = row if row else ("", "", "", "", 0)
             con.execute("""INSERT INTO deliberacoes(
                 arquivo,inf_numero,reuniao_tipo,data,data_iso,item,tipo,assunto,
-                processo,reg,relator,decisao,texto,link,
+                processo,reg,relator,decisao,texto,link,natureza,proc_norm,
                 resumo,palavras_chave,partes,resultado,ai_feito,coletado_em)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(arquivo,item) DO UPDATE SET
                 inf_numero=excluded.inf_numero, reuniao_tipo=excluded.reuniao_tipo,
                 data=excluded.data, data_iso=excluded.data_iso, tipo=excluded.tipo,
                 assunto=excluded.assunto, processo=excluded.processo, reg=excluded.reg,
                 relator=excluded.relator, decisao=excluded.decisao, texto=excluded.texto,
-                link=excluded.link""",
+                link=excluded.link, natureza=excluded.natureza,
+                proc_norm=excluded.proc_norm""",
                 (base, inf_num, r_tipo, data, data_iso, item, tipo, assunto,
-                 processo, reg, relator, decisao, corpo, link,
+                 processo, reg, relator, decisao, corpo, link, natureza, pn,
                  res, pc, pa, rs, ai, hoje))
             n_del += 1
     con.commit()
     tot = con.execute("SELECT COUNT(*) FROM deliberacoes").fetchone()[0]
     comai = con.execute("SELECT COUNT(*) FROM deliberacoes WHERE ai_feito=1").fetchone()[0]
-    print("[informativos_seed] tipos:")
-    for tp, c in con.execute("SELECT tipo,COUNT(*) FROM deliberacoes "
-                             "GROUP BY tipo ORDER BY 2 DESC"):
-        print(f"  {c:5d}  {tp}")
+    n_rel_tot = con.execute("SELECT COUNT(*) FROM relatores").fetchone()[0]
+    n_proc_rel = con.execute("SELECT COUNT(DISTINCT proc_norm) FROM relatores").fetchone()[0]
+    print("[informativos_seed] natureza:")
+    for nat, c in con.execute("SELECT natureza,COUNT(*) FROM deliberacoes "
+                              "GROUP BY natureza ORDER BY 2 DESC"):
+        print(f"  {c:5d}  {nat}")
     con.close()
     print(f"[informativos_seed] {n_arq} informativos | {n_del} deliberacoes | "
           f"total base {tot} | com IA {comai}")
+    print(f"[informativos_seed] relatoria: {n_rel_tot} eventos | "
+          f"{n_proc_rel} processos com relator identificado")
 
 
 def pendentes(n=15):
