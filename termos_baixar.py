@@ -20,6 +20,7 @@ Uso:
 import os
 import re
 import sys
+import html
 import time
 import sqlite3
 import datetime as dt
@@ -43,9 +44,10 @@ def norm_proc(p):
     return re.sub(r"\s+", "", m.group(0)).upper() if m else ""
 
 
-def limpar_cel(html):
-    txt = re.sub(r"<[^>]+>", " ", html)
-    txt = txt.replace("&nbsp;", " ")
+def limpar_cel(celula):
+    txt = re.sub(r"<[^>]+>", " ", celula)
+    txt = html.unescape(txt)  # &ndash; &amp; &nbsp; ...
+    txt = txt.replace("\xa0", " ")
     return re.sub(r"\s+", " ", txt).strip()
 
 
@@ -92,7 +94,7 @@ def coletar_aceitos(con, hoje):
                 "ordenar": "recentes", "buscado": "false", "lastName": "",
                 "filtro": "", "dataInicio": "", "dataFim": "", "tipos": ""}
         r = requests.post(URL_ACEITOS, headers=H, data=data, timeout=60)
-        r.encoding = "windows-1252"
+        r.encoding = r.apparent_encoding or "utf-8"
         linhas = linhas_de(r.text)
         achou = 0
         for cels, link in linhas:
@@ -117,7 +119,7 @@ def coletar_aceitos(con, hoje):
 
 def coletar_rejeitados(con, hoje):
     r = requests.get(URL_REJEIT, headers=H, timeout=120)
-    r.encoding = "windows-1252"
+    r.encoding = r.apparent_encoding or "utf-8"
     n = 0
     for cels, link in linhas_de(r.text):
         if len(cels) < 3 or not re.search(r"\d{4}", cels[0] or ""):
