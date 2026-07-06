@@ -405,10 +405,10 @@ def render_atas():
             re.escape(membro.lower()), na=False)
     res = df[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
     st.metric("Atas encontradas", len(res))
-    cols = ["numero", "tipo", "data", "resumo", "link"]
+    cols = ["numero", "tipo", "data", "palavras_chave", "resumo", "link"]
     show = res[cols].rename(columns={
         "numero": "Nº", "tipo": "Tipo", "data": "Data",
-        "resumo": "Resumo (IA)", "link": "Link"})
+        "palavras_chave": "Palavras-chave", "resumo": "Resumo (IA)", "link": "Link"})
     st.caption("👆 Clique numa linha para ver a ata completa (metadados, análise de IA e texto).")
     ev = st.dataframe(
         show, use_container_width=True, hide_index=True, height=440,
@@ -424,6 +424,79 @@ def render_atas():
             dialog_ata(res.iloc[sel[0]])
 
 
+def render_filtros_aud(df):
+    """Filtros da aba Audiências — renderiza no container atual e retorna os valores."""
+    if st.button("🧹 Limpar filtros", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            if k.startswith(("f_", "q_assunto", "q_pessoa", "ac_assunto", "ac_pessoa")):
+                del st.session_state[k]
+        st.rerun()
+    validas = df.dropna(subset=["data_dt"])
+    dmin = validas["data_dt"].min().date() if len(validas) else dt.date(1948, 1, 1)
+    dmax = validas["data_dt"].max().date() if len(validas) else dt.date.today()
+    hoje = dt.date.today()
+    cp, cd = st.columns([1, 2])
+    atalho = cp.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
+                                  "Futuro", "Personalizado"], index=0, key="f_periodo")
+    de = ate = None
+    if atalho == "Hoje":
+        de = ate = hoje
+    elif atalho == "Esta semana":
+        de = hoje - dt.timedelta(days=hoje.weekday())
+        ate = de + dt.timedelta(days=6)
+    elif atalho == "Este mês":
+        de = hoje.replace(day=1)
+        ate = (de + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+    elif atalho == "Futuro":
+        de = hoje + dt.timedelta(days=1)
+    elif atalho == "Personalizado":
+        de = cd.date_input("De (data inicial)", value=None, key="f_de",
+                           min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
+        ate = cd.date_input("Até (data final)", value=None, key="f_ate",
+                            min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
+    sugerir = st.checkbox(
+        "💡 Autocomplete (sugerir da base)", value=False, key="f_sugerir",
+        help="Sugestões da base ao digitar; clicar adiciona. Desligado = texto livre.")
+    nomes_idx = assuntos_idx = []
+    if sugerir:
+        nomes_idx, assuntos_idx = indices()
+    ca, cb = st.columns(2)
+    with ca:
+        st.markdown("**Assunto**")
+        if sugerir:
+            _asel = st.multiselect("Assunto", assuntos_idx, key="f_ms_assunto",
+                                   label_visibility="collapsed",
+                                   placeholder="digite p/ filtrar e marque vários…")
+            assunto_q = ", ".join(f'"{x}"' for x in _asel)
+        else:
+            assunto_q = st.text_input("Assunto", key="q_assunto",
+                                      label_visibility="collapsed",
+                                      help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+    with cb:
+        st.markdown("**Pessoa (nome)**")
+        if sugerir:
+            _psel = st.multiselect("Pessoa", nomes_idx, key="f_ms_pessoa",
+                                   label_visibility="collapsed",
+                                   placeholder="digite p/ filtrar e marque vários…")
+            pessoa_q = ", ".join(f'"{x}"' for x in _psel)
+        else:
+            pessoa_q = st.text_input("Pessoa (nome)", key="q_pessoa",
+                                     label_visibility="collapsed",
+                                     help='Ex.: felipe claudino (as duas). "felipe claudino" = exato. Vírgula = OU.')
+    cc, cd2, ce = st.columns(3)
+    status_disp = sorted(s for s in df["status"].dropna().unique() if s)
+    status_sel = cc.multiselect("Status", status_disp, key="f_status",
+                                help="Ex.: Confirmada, Cancelada. Vazio = todos.")
+    mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
+              .groupby("sigla")["componente"].first().to_dict())
+    rot = lambda s: f"{s} — {mapa.get(s, '')[len(s) + 3:]}".rstrip(" —")
+    siglas = cd2.multiselect("Componente (sigla)", sorted(mapa), key="f_siglas",
+                             help="Mostra só estes componentes.", format_func=rot)
+    excluir = ce.multiselect("Excluir componentes", sorted(mapa), key="f_excluir",
+                             help="Remove estes componentes (ex.: excluir 'DHM').", format_func=rot)
+    return de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel
+
+
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
@@ -431,154 +504,70 @@ def main():
     if not autenticado():
         return
 
-    if not os.path.exists(DB_PATH):
-        st.warning("Banco de dados ainda não disponível.")
-        return
-
-    df = carregar()
-
-    # ---- filtros (barra lateral) — aplicam-se à aba Audiências ----
-    with st.sidebar:
-        st.header("Filtros — Audiências")
-        if st.button("🧹 Limpar filtros", use_container_width=True):
-            for k in list(st.session_state.keys()):
-                if k.startswith(("f_", "q_assunto", "q_pessoa", "ac_assunto", "ac_pessoa")):
-                    del st.session_state[k]
-            st.rerun()
-        validas = df.dropna(subset=["data_dt"])
-        dmin = validas["data_dt"].min().date() if len(validas) else dt.date(1948, 1, 1)
-        dmax = validas["data_dt"].max().date() if len(validas) else dt.date.today()
-
-        hoje = dt.date.today()
-        atalho = st.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
-                                      "Futuro", "Personalizado"], index=0, key="f_periodo")
-        de = ate = None
-        if atalho == "Hoje":
-            de = ate = hoje
-        elif atalho == "Esta semana":
-            de = hoje - dt.timedelta(days=hoje.weekday())
-            ate = de + dt.timedelta(days=6)
-        elif atalho == "Este mês":
-            de = hoje.replace(day=1)
-            ate = (de + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
-        elif atalho == "Futuro":
-            de = hoje + dt.timedelta(days=1)
-        elif atalho == "Personalizado":
-            de = st.date_input("De (data inicial)", value=None, key="f_de",
-                               min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-            ate = st.date_input("Até (data final)", value=None, key="f_ate",
-                                min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-
-        sugerir = st.checkbox(
-            "💡 Autocomplete (sugerir da base)", value=False, key="f_sugerir",
-            help="Mostra nomes/assuntos da base que combinam. As sugestões só entram "
-                 "se você CLICAR — você sempre pode digitar um texto livre.")
-        nomes_idx = assuntos_idx = []
-        if sugerir:
-            nomes_idx, assuntos_idx = indices()
-
-        st.markdown("**Assunto**")
-        if sugerir:
-            _asel = st.multiselect(
-                "Assunto", assuntos_idx, key="f_ms_assunto",
-                label_visibility="collapsed",
-                placeholder="digite p/ filtrar e marque vários…")
-            assunto_q = ", ".join(f'"{x}"' for x in _asel)
-        else:
-            assunto_q = st.text_input(
-                "Assunto", key="q_assunto", label_visibility="collapsed",
-                help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
-
-        status_disp = sorted(s for s in df["status"].dropna().unique() if s)
-        status_sel = st.multiselect("Status", status_disp, key="f_status",
-                                    help="Ex.: Confirmada, Cancelada. Vazio = todos.")
-
-        mapa = (df.dropna(subset=["sigla"]).query("sigla != ''")
-                  .groupby("sigla")["componente"].first().to_dict())
-        rot = lambda s: f"{s} — {mapa.get(s, '')[len(s) + 3:]}".rstrip(" —")
-        siglas = st.multiselect("Componente (sigla)", sorted(mapa), key="f_siglas",
-                                help="Mostra só estes componentes.", format_func=rot)
-        excluir = st.multiselect("Excluir componentes (siglas)", sorted(mapa), key="f_excluir",
-                                 help="Remove estes componentes. Ex.: buscar 'henrique "
-                                      "machado' e excluir 'DHM' tira as que ele conduziu "
-                                      "como diretor.", format_func=rot)
-
-        st.markdown("**Pessoa (nome)**")
-        if sugerir:
-            _psel = st.multiselect(
-                "Pessoa", nomes_idx, key="f_ms_pessoa",
-                label_visibility="collapsed",
-                placeholder="digite p/ filtrar e marque vários…")
-            pessoa_q = ", ".join(f'"{x}"' for x in _psel)
-        else:
-            pessoa_q = st.text_input(
-                "Pessoa (nome)", key="q_pessoa", label_visibility="collapsed",
-                help='Ex.: felipe claudino → tem as duas palavras. "felipe claudino" = '
-                     'exato. Vírgula = OU (ex.: vorcaro, machado).')
-
-        st.divider()
-        st.caption("Dica: com o Autocomplete ligado, digite e as sugestões aparecem ao "
-                   "vivo; clique para adicionar (o item some da lista). Desligado, é texto "
-                   "livre. Clique no cabeçalho da coluna para ordenar.")
-
-    res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
-
     aba_aud, aba_pas, aba_atas = st.tabs(
         ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
          "📋 Atas do CGE"])
 
     with aba_aud:
-        st.subheader("🏛️ Audiências Particulares — CVM")
-        st.caption(f"Base local de dados públicos da CVM • {len(df):,} audiências • "
-                   f"atualizada em {df['coletado_em'].max()}".replace(",", "."))
-        c1, c2 = st.columns(2)
-        c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
-        c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
-        rr = res.dropna(subset=["data_dt"])
-        if len(rr):
-            st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
-                       f"a **{rr['data_dt'].max():%d/%m/%Y}**")
+        if not os.path.exists(DB_PATH):
+            st.warning("Banco de dados ainda não disponível.")
+        else:
+            df = carregar()
+            st.subheader("🏛️ Audiências Particulares — CVM")
+            st.caption(f"Base local de dados públicos da CVM • {len(df):,} audiências • "
+                       f"atualizada em {df['coletado_em'].max()}".replace(",", "."))
+            with st.expander("🔎 Filtros", expanded=True):
+                (de, ate, assunto_q, siglas, excluir, pessoa_q,
+                 status_sel) = render_filtros_aud(df)
+            res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
 
-        aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
-
-        with aba_lista:
-            st.caption("👆 Clique em uma linha para ver os detalhes (como no site da CVM). "
-                       "⚠️ Os filtros na barra lateral são desta aba (Audiências).")
-            ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
-            cols = ["id", "data", "hora", "componente", "assunto",
-                    "solicitante_nome", "acompanhantes", "status", "link"]
-            show = ordenado[cols].rename(columns={
-                "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
-                "assunto": "Assunto", "solicitante_nome": "Solicitante",
-                "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
-            event = st.dataframe(
-                show, use_container_width=True, hide_index=True, height=480,
-                on_select="rerun", selection_mode="single-row",
-                column_config={
-                    "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
-            st.download_button(
-                "⬇️ Baixar resultados (CSV)",
-                data=show.to_csv(index=False).encode("utf-8-sig"),
-                file_name="audiencias_cvm.csv", mime="text/csv")
-            sel = event.selection.rows if getattr(event, "selection", None) else []
-            if sel:
-                sel_id = int(ordenado.iloc[sel[0]]["id"])
-                if sel_id != st.session_state.get("dlg_id"):
-                    st.session_state["dlg_id"] = sel_id
-                    dialog_detalhe(ordenado.iloc[sel[0]])
-
-        with aba_panorama:
+            c1, c2 = st.columns(2)
+            c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
+            c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
             rr = res.dropna(subset=["data_dt"])
             if len(rr):
-                por_mes = (rr.set_index("data_dt").resample("MS").size()
-                           .rename("Audiências").to_frame())
-                st.subheader("Audiências por mês")
-                st.line_chart(por_mes)
-                st.subheader("Top 15 componentes")
-                top = res["componente"].value_counts().head(15).sort_values()
-                st.bar_chart(top)
-            else:
-                st.info("Sem datas para exibir no panorama com os filtros atuais.")
+                st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
+                           f"a **{rr['data_dt'].max():%d/%m/%Y}**")
+
+            aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
+
+            with aba_lista:
+                st.caption("👆 Clique em uma linha para ver os detalhes (como no site da CVM).")
+                ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
+                cols = ["id", "data", "hora", "componente", "assunto",
+                        "solicitante_nome", "acompanhantes", "status", "link"]
+                show = ordenado[cols].rename(columns={
+                    "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
+                    "assunto": "Assunto", "solicitante_nome": "Solicitante",
+                    "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
+                event = st.dataframe(
+                    show, use_container_width=True, hide_index=True, height=480,
+                    on_select="rerun", selection_mode="single-row",
+                    column_config={
+                        "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
+                st.download_button(
+                    "⬇️ Baixar resultados (CSV)",
+                    data=show.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="audiencias_cvm.csv", mime="text/csv")
+                sel = event.selection.rows if getattr(event, "selection", None) else []
+                if sel:
+                    sel_id = int(ordenado.iloc[sel[0]]["id"])
+                    if sel_id != st.session_state.get("dlg_id"):
+                        st.session_state["dlg_id"] = sel_id
+                        dialog_detalhe(ordenado.iloc[sel[0]])
+
+            with aba_panorama:
+                rr = res.dropna(subset=["data_dt"])
+                if len(rr):
+                    por_mes = (rr.set_index("data_dt").resample("MS").size()
+                               .rename("Audiências").to_frame())
+                    st.subheader("Audiências por mês")
+                    st.line_chart(por_mes)
+                    st.subheader("Top 15 componentes")
+                    top = res["componente"].value_counts().head(15).sort_values()
+                    st.bar_chart(top)
+                else:
+                    st.info("Sem datas para exibir no panorama com os filtros atuais.")
 
     with aba_pas:
         render_processos()
