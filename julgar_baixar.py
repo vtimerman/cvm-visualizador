@@ -26,6 +26,8 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(DIR, "julgar.db")
 PAGINA = ("https://www.gov.br/cvm/pt-br/assuntos/processos/"
           "processos-a-julgar-por-relator")
+PAGINA_JULGADOS = ("https://www.gov.br/cvm/pt-br/assuntos/processos/"
+                   "processos-julgados-por-relator")
 H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
@@ -43,14 +45,19 @@ def conectar():
         relator_nome TEXT, processo TEXT, proc_norm TEXT,
         tipo TEXT, rito TEXT, dt_inicio TEXT, data_ref TEXT,
         fonte TEXT, coletado_em TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS julgados(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        relator_nome TEXT, processo TEXT, proc_norm TEXT,
+        tipo TEXT, rito TEXT, sup TEXT, data_julg TEXT,
+        fonte TEXT, coletado_em TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS julgar_meta(
         chave TEXT PRIMARY KEY, valor TEXT)""")
     con.commit()
     return con
 
 
-def achar_xlsx():
-    r = requests.get(PAGINA, headers=H, timeout=60)
+def achar_xlsx(pagina=PAGINA):
+    r = requests.get(pagina, headers=H, timeout=60)
     r.encoding = "utf-8"
     # link .xlsx do conteudo (o rotulo costuma citar "Sancionadores com Relator")
     cands = re.findall(r'href=["\']([^"\']+\.xlsx)["\']', r.text, re.I)
@@ -88,28 +95,36 @@ def parse_xlsx(conteudo):
         re.sub(r"\s+", " ", titulo).strip()
     if hdr is None:
         return titulo, []
-    ci = {name: cols.index(name) for name in
-          ["relator", "processo", "tipo", "rito"] if name in cols}
-    # colunas de data pelo rotulo aproximado
-    idx_ini = next((j for j, v in enumerate(cols) if "in" in v and "cio" in v), None)
-    idx_data = next((j for j, v in enumerate(cols)
-                     if v.strip() == "data"), None)
-    out = []
-    relator = ""
+
+    def _col(*subs):
+        for j, v in enumerate(cols):
+            if any(sub in v for sub in subs):
+                return j
+        return None
+    i_rel, i_proc = _col("relator"), _col("processo")
+    i_tipo, i_rito, i_sup = _col("tipo"), _col("rito"), _col("sup")
+    i_ini = _col("início", "inicio", "in cio")
+    # a coluna "Data" (julgamento/pauta) — a que nao e' a de inicio
+    i_data = next((j for j, v in enumerate(cols)
+                   if v.strip() == "data" and j != i_ini), None)
+
+    def cel(row, j):
+        return re.sub(r"\s+", " ", str(row[j])).strip() if j is not None and row[j] else ""
+
+    out, relator = [], ""
     for row in linhas[hdr + 1:]:
-        proc = row[ci["processo"]] if "processo" in ci else None
-        if proc is None or not str(proc).strip():
+        proc = cel(row, i_proc)
+        if not proc:
             continue
-        rel_cell = row[ci["relator"]] if "relator" in ci else None
-        if rel_cell and str(rel_cell).strip():
-            relator = re.sub(r"\s+", " ", str(rel_cell)).strip()
+        rel = cel(row, i_rel)
+        if rel:
+            relator = rel  # forward-fill (a-julgar agrupa; julgados repete)
         out.append({
-            "relator": relator,
-            "processo": str(proc).strip(),
-            "tipo": str(row[ci["tipo"]]).strip() if "tipo" in ci and row[ci["tipo"]] else "",
-            "rito": str(row[ci["rito"]]).strip() if "rito" in ci and row[ci["rito"]] else "",
-            "dt_inicio": _fmt_data(row[idx_ini]) if idx_ini is not None else "",
-            "data_ref": _fmt_data(row[idx_data]) if idx_data is not None else "",
+            "relator": relator, "processo": proc,
+            "tipo": cel(row, i_tipo), "rito": cel(row, i_rito),
+            "sup": cel(row, i_sup),
+            "dt_inicio": _fmt_data(row[i_ini]) if i_ini is not None else "",
+            "data_ref": _fmt_data(row[i_data]) if i_data is not None else "",
         })
     return titulo, out
 
@@ -135,11 +150,27 @@ def construir():
     con.execute("INSERT OR REPLACE INTO julgar_meta VALUES('fonte',?)",
                 (os.path.basename(xlsx),))
     con.execute("INSERT OR REPLACE INTO julgar_meta VALUES('atualizado_em',?)", (hoje,))
+    # segunda fonte: processos JA julgados por relator
+    nj = 0
+    xlsx_j = achar_xlsx(PAGINA_JULGADOS)
+    if xlsx_j:
+        rj = requests.get(xlsx_j, headers=H, timeout=90)
+        _, linhas_j = parse_xlsx(rj.content)
+        con.execute("DELETE FROM julgados")
+        for x in linhas_j:
+            con.execute("""INSERT INTO julgados(relator_nome,processo,proc_norm,tipo,
+                rito,sup,data_julg,fonte,coletado_em) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (x["relator"], x["processo"], norm_proc(x["processo"]), x["tipo"],
+                 x["rito"], x["sup"], x["data_ref"], os.path.basename(xlsx_j), hoje))
+            nj += 1
+        con.execute("INSERT OR REPLACE INTO julgar_meta VALUES('fonte_julgados',?)",
+                    (os.path.basename(xlsx_j),))
     con.commit()
     n = con.execute("SELECT COUNT(*) FROM a_julgar").fetchone()[0]
     nrel = con.execute("SELECT COUNT(DISTINCT relator_nome) FROM a_julgar").fetchone()[0]
     con.close()
-    print(f"[julgar] {n} processos a julgar | {nrel} relatores | fonte {os.path.basename(xlsx)}")
+    print(f"[julgar] {n} a julgar ({nrel} relatores) | {nj} julgados | "
+          f"fonte {os.path.basename(xlsx)}")
     print(f"[julgar] titulo: {titulo}")
 
 

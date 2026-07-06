@@ -19,7 +19,7 @@ INF_DB_PATH = os.environ.get("INF_DB_PATH", os.path.join(os.path.dirname(os.path
 TERMOS_DB_PATH = os.environ.get("TERMOS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "termos.db"))
 JULGAR_DB_PATH = os.environ.get("JULGAR_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "julgar.db"))
 
-st.set_page_config(page_title="Audiências CVM", page_icon="🏛️", layout="wide")
+st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
 
 # --------------------------------------------------------------------------
@@ -40,7 +40,7 @@ def autenticado() -> bool:
     def _conferir():
         st.session_state["auth"] = st.session_state.get("pw", "") == senha_certa
 
-    st.title("🏛️ Audiências Particulares — CVM")
+    st.title("🏛️ Motumbo CVM")
     st.text_input("Senha de acesso", type="password", key="pw", on_change=_conferir)
     if st.session_state.get("auth") is False:
         st.error("Senha incorreta.")
@@ -686,6 +686,21 @@ def carregar_termos():
 
 
 @st.cache_data(ttl=300)
+def indices_termos():
+    """Lista de nomes distintos de compromitentes/proponentes (para autocomplete)."""
+    df = carregar_termos()
+    if df is None or len(df) == 0:
+        return []
+    nomes = set()
+    for p in df["partes"].dropna():
+        for parte in re.split(r"\s+e\s+|;|/|,| - ", str(p)):
+            parte = parte.strip(" . ")
+            if len(parte) >= 4 and not parte.isdigit():
+                nomes.add(parte)
+    return sorted(nomes)
+
+
+@st.cache_data(ttl=300)
 def mapa_tc():
     """proc_norm -> 'Aceito' / 'Rejeitado' / 'Aceito+Rejeitado' (situações do TC)."""
     df = carregar_termos()
@@ -776,6 +791,20 @@ def render_termos():
                           key="tc_q",
                           help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
         f_sit = c2.multiselect("Situação", ["Aceito", "Rejeitado"], key="tc_sit")
+        sug = st.checkbox(
+            "💡 Autocomplete de nomes (sugerir da base)", value=False, key="tc_sug",
+            help="Sugere compromitentes/proponentes da base; marque um ou mais (variantes "
+                 "do nome). Basta um nome bater para o TC aparecer.")
+        if sug:
+            nomes_sel = st.multiselect(
+                "Compromitente / proponente", indices_termos(), key="tc_ms_nome",
+                placeholder="digite p/ filtrar e marque um ou mais…")
+            nome_livre = ""
+        else:
+            nomes_sel = []
+            nome_livre = st.text_input(
+                "Compromitente / proponente", key="tc_nome",
+                placeholder="basta um nome (quem tentou ou foi beneficiado pelo TC)…")
         c3, c4 = st.columns(2)
         anos = sorted({int(a[-4:]) for a in df["data_decisao"].dropna()
                        if re.search(r"\d{4}$", str(a))}, reverse=True)
@@ -785,6 +814,14 @@ def render_termos():
     m = pd.Series(True, index=df.index)
     if q.strip():
         m &= match_busca(df, ["processo", "partes"], q)
+    partes_l = df["partes"].fillna("").str.lower()
+    if nomes_sel:  # OU entre os nomes escolhidos (basta um bater)
+        alvo = pd.Series(False, index=df.index)
+        for nome in nomes_sel:
+            alvo |= partes_l.str.contains(re.escape(nome.lower()), na=False)
+        m &= alvo
+    if nome_livre.strip():
+        m &= partes_l.str.contains(re.escape(nome_livre.lower().strip()), na=False)
     if f_sit:
         m &= df["situacao"].isin(f_sit)
     if f_anos:
@@ -1072,64 +1109,115 @@ def carregar_julgar():
     return df, meta
 
 
-@st.cache_data(ttl=300)
-def mapa_siglas():
-    """sigla -> nome do diretor (mais recente), das legendas dos informativos."""
-    if not os.path.exists(INF_DB_PATH):
-        return {}
-    con = sqlite3.connect(INF_DB_PATH)
-    try:
-        rows = con.execute("SELECT sigla,nome,data_iso FROM siglas").fetchall()
-    except Exception:
-        rows = []
-    con.close()
-    melhor = {}
-    for sigla, nome, di in sorted(rows, key=lambda r: r[2] or ""):
-        melhor[sigla] = nome
-    return melhor
-
-
 def _slug(s):
     s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
     return re.sub(r"\s+", " ", s.lower()).strip()
 
 
-def sigla_de_nome(nome_oficial):
-    """Mapeia o nome oficial do relator (planilha) para a sigla (informativos)."""
+# ruído comum nas mencoes que NAO sao membros do Colegiado
+_RUIDO_NOME = {"substituto", "substituta", "presidente", "relatora", "relator",
+               "interino", "interina", "companhia", "geral", "executivo"}
+# linha do tempo dos PRESIDENTES (curada; pequena e publica) para resolver 'PTE'
+PRES_TIMELINE = [
+    ("Marcelo Barbosa", "", "2021-07-31"),
+    ("João Pedro Nascimento", "2021-08-01", "2025-07-31"),
+    ("Otto Lobo", "2025-08-01", "9999-12-31"),
+]
+
+
+@st.cache_data(ttl=300)
+def carregar_julgados():
+    if not os.path.exists(JULGAR_DB_PATH):
+        return None
+    con = sqlite3.connect(JULGAR_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM julgados", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def mapa_diretores():
+    """sigla de diretor -> nome (o mais frequente nos informativos; filtra ruído)."""
+    if not os.path.exists(INF_DB_PATH):
+        return {}
+    con = sqlite3.connect(INF_DB_PATH)
+    try:
+        rows = con.execute("""SELECT sigla,nome,COUNT(*) n FROM siglas
+            WHERE papel='diretor' GROUP BY sigla,nome ORDER BY sigla,n DESC""").fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    out = {}
+    for sigla, nome, n in rows:
+        if sigla in out or n < 5:
+            continue
+        if nome.split()[0].lower() in _RUIDO_NOME:
+            continue
+        out[sigla] = nome
+    return out
+
+
+def presidente_em(data_iso):
+    di = data_iso or "2026-01-01"
+    for nome, a, b in PRES_TIMELINE:
+        if (not a or di >= a) and di <= b:
+            return nome
+    return PRES_TIMELINE[-1][0]
+
+
+def pessoa_de_sigla(sigla, data_iso=""):
+    """Nome da pessoa por trás de uma sigla de relator (PTE resolve por data)."""
+    if not sigla:
+        return ""
+    if sigla == "PTE":
+        return presidente_em(data_iso)
+    return mapa_diretores().get(sigla, sigla)
+
+
+def pessoa_de_nome(nome_oficial):
+    """Nome oficial (planilha) -> nome canônico do diretor conhecido."""
     alvo = set(_slug(nome_oficial).split())
-    for sigla, curto in mapa_siglas().items():
-        toks = [t for t in _slug(curto).split() if len(t) >= 3]
+    for sigla, nome in mapa_diretores().items():
+        toks = [t for t in _slug(nome).split() if len(t) >= 3]
         if toks and toks[-1] in alvo and (len(toks) == 1 or toks[0] in alvo):
-            return sigla
-    return ""
+            return nome
+    return nome_oficial
 
 
 @st.cache_data(ttl=300)
 def calcular_inconsistencias():
-    """Compara 'processos a julgar' (oficial) com o que temos nas outras bases."""
+    """Compara 'processos a julgar' (oficial) com o que temos, comparando por PESSOA
+    (agrega, p.ex., Otto Lobo aparecendo como PTE e como DOL)."""
     jul, _ = carregar_julgar()
-    res = {"divergente": [], "sem_relator": [], "tc_aceito": []}
+    res = {"divergente": [], "sem_relator": [], "tc_aceito": [], "ja_julgado": []}
     if jul is None or len(jul) == 0:
         return res
     mrel = mapa_relator_atual()
     mtc = mapa_tc()
-    msig = mapa_siglas()
+    julg = carregar_julgados()
+    set_julg = set(julg["proc_norm"]) - {""} if julg is not None else set()
     for _, r in jul.iterrows():
         pn = r["proc_norm"]
-        oficial = sigla_de_nome(r["relator_nome"])
-        deduz = mrel.get(pn, ("",))[0] if pn else ""
-        if oficial and deduz and oficial != deduz:
+        ofic_nome = pessoa_de_nome(r["relator_nome"])
+        deduz = mrel.get(pn, ("", ""))[:2] if pn else ("", "")
+        ded_sigla, ded_data = deduz
+        ded_nome = pessoa_de_sigla(ded_sigla, ded_data)
+        if ded_sigla and _slug(ofic_nome) != _slug(ded_nome):
             res["divergente"].append({
-                "processo": r["processo"], "oficial": oficial,
-                "oficial_nome": r["relator_nome"], "deduzido": deduz,
-                "deduzido_nome": msig.get(deduz, deduz),
-                "desde": mrel.get(pn, ("", ""))[1] if pn else ""})
-        elif pn and not deduz:
+                "processo": r["processo"], "oficial": ofic_nome,
+                "deduzido": ded_nome, "sigla": ded_sigla, "desde": ded_data})
+        elif pn and not ded_sigla:
             res["sem_relator"].append({
                 "processo": r["processo"], "relator": r["relator_nome"],
                 "tipo": r["tipo"], "inicio": r["dt_inicio"]})
         if pn and "Aceito" in mtc.get(pn, ""):
             res["tc_aceito"].append({
+                "processo": r["processo"], "relator": r["relator_nome"]})
+        if pn and pn in set_julg:
+            res["ja_julgado"].append({
                 "processo": r["processo"], "relator": r["relator_nome"]})
     return res
 
@@ -1171,9 +1259,9 @@ def render_painel():
           f"{int((atas['ai_feito'] == 1).sum())} com IA" if atas is not None else "")
     njul = len(jul) if jul is not None else 0
     _card(c[2], "⚖️ A Julgar", f"{njul}", jmeta.get("atualizado_em", ""))
-    nrel = jul["relator_nome"].nunique() if jul is not None and len(jul) else 0
-    _card(c[3], "👤 Relatores (a julgar)", f"{nrel}",
-          jmeta.get("titulo", "")[:30])
+    julgd = carregar_julgados()
+    _card(c[3], "✔️ Julgados", f"{len(julgd):,}".replace(",", ".") if julgd is not None else "—",
+          jmeta.get("fonte_julgados", "").replace(".xlsx", ""))
 
     st.divider()
     st.markdown("#### ⚠️ Inconsistências")
@@ -1182,18 +1270,29 @@ def render_painel():
     else:
         inc = calcular_inconsistencias()
         d, s, t = inc["divergente"], inc["sem_relator"], inc["tc_aceito"]
-        m1, m2, m3 = st.columns(3)
+        jj = inc["ja_julgado"]
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("🔀 Relator divergente", len(d),
-                  help="Relator oficial (a julgar) ≠ relator deduzido dos informativos.")
+                  help="Relator oficial (a julgar) ≠ relator deduzido dos informativos (por pessoa).")
         m2.metric("❓ Sem relator deduzido", len(s),
                   help="Processo a julgar sem relator identificado nos informativos.")
         m3.metric("✅ TC aceito mas a julgar", len(t),
                   help="Processo com Termo de Compromisso aceito ainda listado a julgar.")
+        m4.metric("♻️ Já julgado mas a julgar", len(jj),
+                  help="Processo que consta na lista oficial de julgados E na de a julgar.")
+        if jj:
+            st.markdown("**♻️ Consta como já julgado e ainda listado a julgar:**")
+            st.dataframe(pd.DataFrame(jj).rename(columns={
+                "processo": "Processo", "relator": "Relator oficial"}),
+                use_container_width=True, hide_index=True)
         if d:
-            st.markdown("**🔀 Relator divergente** — o oficial diverge do que deduzimos:")
+            st.markdown("**🔀 Relator divergente** — o relator oficial (a julgar) diverge "
+                        "do que deduzimos dos informativos (comparação por pessoa; o Otto "
+                        "aparecendo como PTE e como DOL é tratado como a mesma pessoa):")
             st.dataframe(pd.DataFrame(d).rename(columns={
-                "processo": "Processo", "oficial": "Oficial", "oficial_nome": "Relator oficial",
-                "deduzido": "Deduzido", "deduzido_nome": "Deduzido (nome)", "desde": "Deduz. desde"}),
+                "processo": "Processo", "oficial": "Relator oficial",
+                "deduzido": "Deduzido (nome)", "sigla": "Deduz. (sigla)",
+                "desde": "Deduz. desde"}),
                 use_container_width=True, hide_index=True)
         if t:
             st.markdown("**✅ TC aceito mas ainda listado a julgar:**")
@@ -1206,18 +1305,21 @@ def render_painel():
                     "processo": "Processo", "relator": "Relator oficial",
                     "tipo": "Tipo", "inicio": "Início"}),
                     use_container_width=True, hide_index=True)
-        if not (d or s or t):
+        if not (d or s or t or jj):
             st.success("Nenhuma inconsistência detectada. 🎉")
 
     st.divider()
     st.markdown("#### ⚖️ Processos a julgar (fonte oficial CVM)")
     if jul is not None and len(jul):
         st.caption(f"{jmeta.get('titulo', '')} · fonte: {jmeta.get('fonte', '')}")
-        msig = mapa_siglas()
         mrel = mapa_relator_atual()
+
+        def _ded(r):
+            s, di = mrel.get(r["proc_norm"], ("", ""))[:2]
+            nome = pessoa_de_sigla(s, di)
+            return f"{nome} ({s})" if s else "—"
         v = jul.copy()
-        v["Deduzido (informativos)"] = v.apply(
-            lambda r: mrel.get(r["proc_norm"], ("",))[0], axis=1)
+        v["Deduzido (informativos)"] = v.apply(_ded, axis=1)
         show = v[["relator_nome", "processo", "tipo", "rito", "dt_inicio",
                   "Deduzido (informativos)"]].rename(columns={
             "relator_nome": "Relator oficial", "processo": "Processo",

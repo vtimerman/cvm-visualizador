@@ -113,9 +113,13 @@ def conectar():
         proc_norm TEXT, processo TEXT, reg TEXT, relator TEXT, evento TEXT,
         arquivo TEXT, inf_numero TEXT, data TEXT, data_iso TEXT,
         UNIQUE(proc_norm, arquivo, relator, evento))""")
-    # mapa sigla <-> nome do diretor/presidente (das legendas dos informativos)
+    # mapa sigla <-> nome do diretor/presidente (mencoes 'Dir./Pres. Nome')
+    cols_sig = [r[1] for r in con.execute("PRAGMA table_info(siglas)")]
+    if cols_sig and "papel" not in cols_sig:
+        con.execute("DROP TABLE siglas")  # migra esquema (dado 100% derivado)
     con.execute("""CREATE TABLE IF NOT EXISTS siglas(
-        sigla TEXT, nome TEXT, data_iso TEXT, UNIQUE(sigla, nome))""")
+        sigla TEXT, nome TEXT, papel TEXT, data_iso TEXT, arquivo TEXT,
+        UNIQUE(sigla, nome, arquivo))""")
     con.commit()
     return con
 
@@ -223,19 +227,37 @@ def eventos_sorteio(texto):
     return out
 
 
-RE_LEGENDA = re.compile(
-    r"\b(PTE|D[A-Z]{2,3})\s*[–-]\s*"
-    r"(?:Pres\.|Dir\.\s*Subst\.|Dir\.|Diretor[a]?|Presidente)\s+"
-    r"([A-ZÀ-Ú][A-Za-zÀ-ú.\s]{3,45}?)(?=\s*/|\s*\(|\s*\n|$)")
+# menções "Dir./Pres. Nome Sobrenome" — a sigla do diretor é D+inicial(nome)+inicial(sobrenome)
+RE_MENCAO = re.compile(
+    r"\b(Presidente|Pres\.|Diretora|Diretor|Dir\.)\s+"
+    r"([A-ZÀ-Ú][a-zà-úâêôîûãõäëïöü]+"
+    r"(?:\s+(?:d[aeo]s?\s+)?[A-ZÀ-Ú][a-zà-úâêôîûãõäëïöü]+){1,4})")
 
 
-def legendas(texto):
-    """Extrai pares (sigla, nome) das linhas de legenda 'SIGLA – Dir. Nome'."""
-    out = {}
-    for sigla, nome in RE_LEGENDA.findall(texto):
-        nome = re.sub(r"\s+", " ", nome).strip(" .")
-        if len(nome) >= 4 and " " in nome:
-            out[sigla] = nome
+def _ini(tok):
+    return unicodedata_ascii(tok[:1]).upper()
+
+
+def unicodedata_ascii(s):
+    import unicodedata
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+
+
+def pessoas_mencionadas(texto):
+    """(sigla, nome_curto, papel) das mencoes 'Dir./Pres. Nome'.
+    Diretor Otto Lobo -> ('DOL','Otto Lobo','diretor'); Presidente -> sigla 'PTE'.
+    """
+    out = []
+    for papel, nome in RE_MENCAO.findall(texto):
+        toks = [t for t in nome.split() if t[:1].isupper()]
+        if len(toks) < 2:
+            continue
+        curto = f"{toks[0]} {toks[-1]}"
+        if re.match(r"Pres", papel, re.I):
+            out.append(("PTE", curto, "presidente"))
+        else:
+            sigla = "D" + _ini(toks[0]) + _ini(toks[-1])
+            out.append((sigla, curto, "diretor"))
     return out
 
 
@@ -253,10 +275,10 @@ def construir():
         link = links.get(base, "")
         itens = fatiar(texto)
         n_arq += 1
-        # legendas sigla<->nome (para cruzar com "processos a julgar")
-        for sigla, nome in legendas(texto).items():
-            con.execute("INSERT OR IGNORE INTO siglas(sigla,nome,data_iso) "
-                        "VALUES(?,?,?)", (sigla, nome, data_iso))
+        # mapa sigla<->nome (para cruzar com "processos a julgar", ciente do Otto PTE/DOL)
+        for sigla, nome, papel in pessoas_mencionadas(texto):
+            con.execute("INSERT OR IGNORE INTO siglas(sigla,nome,papel,data_iso,arquivo)"
+                        " VALUES(?,?,?,?,?)", (sigla, nome, papel, data_iso, base))
         # eventos de relatoria: sorteios/redistribuicoes (topo do informativo)
         for reg, proc, sigla in eventos_sorteio(texto):
             pn = norm_proc(proc)
