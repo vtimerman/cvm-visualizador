@@ -13,6 +13,7 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
 PAS_DB_PATH = os.environ.get("PAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "processos.db"))
 URL_PAS = "https://sistemas.cvm.gov.br/asp/cvmwww/inqueritos/DetPasAndamentoSSI.asp?idProc="
+ATAS_DB_PATH = os.environ.get("ATAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "atas.db"))
 
 st.set_page_config(page_title="Audiências CVM", page_icon="🏛️", layout="wide")
 
@@ -345,6 +346,85 @@ def render_processos():
 
 
 # --------------------------------------------------------------------------
+# Atas do CGE
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def carregar_atas():
+    if not os.path.exists(ATAS_DB_PATH):
+        return None
+    con = sqlite3.connect(ATAS_DB_PATH)
+    df = pd.read_sql("SELECT * FROM atas", con)
+    con.close()
+    df["data_dt"] = pd.to_datetime(df["data_iso"], errors="coerce")
+    return df
+
+
+@st.dialog("Ata do CGE", width="large")
+def dialog_ata(row):
+    if row["link"]:
+        st.link_button("Abrir PDF no gov.br ↗", row["link"])
+    st.markdown(f"### Ata {row['numero']}ª — {row['tipo']} — {row['data']}")
+    if str(row["resumo"]).strip():
+        st.markdown(f"**Resumo (IA):** {row['resumo']}")
+    if str(row["deliberacoes"]).strip():
+        st.markdown(f"**Deliberações (IA):** {row['deliberacoes']}")
+    if str(row["palavras_chave"]).strip():
+        st.markdown(f"**Palavras-chave:** {row['palavras_chave']}")
+    if str(row["membros"]).strip():
+        st.markdown("**Membros presentes:** " + str(row["membros"]).replace(" | ", ", "))
+    with st.expander("📄 Texto completo da ata"):
+        st.text(row["texto"])
+
+
+def render_atas():
+    df = carregar_atas()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base de Atas do CGE ainda não está disponível.")
+        return
+    com_ia = int((df["ai_feito"] == 1).sum())
+    st.caption(f"{len(df)} atas do CGE • {com_ia} já com análise de IA (o resto entra "
+               "conforme a rotina local roda).")
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        q = c1.text_input("Buscar (texto, resumo, deliberações)", key="a_q")
+        tipos = sorted(t for t in df["tipo"].dropna().unique() if t)
+        f_tipo = c2.multiselect("Tipo", tipos, key="a_tipo")
+        membro = c3.text_input("Membro (nome)", key="a_membro",
+                               placeholder="ex.: berwanger")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        alvo = (df["texto"].fillna("") + " " + df["resumo"].fillna("") + " "
+                + df["deliberacoes"].fillna("") + " "
+                + df["palavras_chave"].fillna("")).str.lower()
+        for w in q.lower().split():
+            m &= alvo.str.contains(re.escape(w), na=False)
+    if f_tipo:
+        m &= df["tipo"].isin(f_tipo)
+    if membro.strip():
+        m &= df["membros"].fillna("").str.lower().str.contains(
+            re.escape(membro.lower()), na=False)
+    res = df[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
+    st.metric("Atas encontradas", len(res))
+    cols = ["numero", "tipo", "data", "resumo", "link"]
+    show = res[cols].rename(columns={
+        "numero": "Nº", "tipo": "Tipo", "data": "Data",
+        "resumo": "Resumo (IA)", "link": "Link"})
+    st.caption("👆 Clique numa linha para ver a ata completa (metadados, análise de IA e texto).")
+    ev = st.dataframe(
+        show, use_container_width=True, hide_index=True, height=440,
+        on_select="rerun", selection_mode="single-row",
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="PDF ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="atas_cge.csv", mime="text/csv")
+    sel = ev.selection.rows if getattr(ev, "selection", None) else []
+    if sel:
+        aid = res.iloc[sel[0]]["arquivo"]
+        if aid != st.session_state.get("dlg_ata"):
+            st.session_state["dlg_ata"] = aid
+            dialog_ata(res.iloc[sel[0]])
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 def main():
@@ -447,8 +527,9 @@ def main():
 
     res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
 
-    aba_aud, aba_pas = st.tabs(
-        ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores"])
+    aba_aud, aba_pas, aba_atas = st.tabs(
+        ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
+         "📋 Atas do CGE"])
 
     with aba_aud:
         c1, c2 = st.columns(2)
@@ -502,6 +583,9 @@ def main():
 
     with aba_pas:
         render_processos()
+
+    with aba_atas:
+        render_atas()
 
 
 if __name__ == "__main__":

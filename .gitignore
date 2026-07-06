@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 *.log
 .lock
+atas_pdf/
+atas_txt/
