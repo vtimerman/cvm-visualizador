@@ -1329,97 +1329,101 @@ def render_painel():
                            file_name="processos_a_julgar.csv", mime="text/csv")
 
 
+def render_audiencias():
+    if not os.path.exists(DB_PATH):
+        st.warning("Banco de dados ainda não disponível.")
+        return
+    df = carregar()
+    st.subheader("🏛️ Audiências Particulares — CVM")
+    st.caption(f"Base local de dados públicos da CVM • {len(df):,} audiências • "
+               f"atualizada em {df['coletado_em'].max()}".replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        (de, ate, assunto_q, siglas, excluir, pessoa_q,
+         status_sel) = render_filtros_aud(df)
+    res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
+
+    c1, c2 = st.columns(2)
+    c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
+    c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
+    rr = res.dropna(subset=["data_dt"])
+    if len(rr):
+        st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
+                   f"a **{rr['data_dt'].max():%d/%m/%Y}**")
+
+    aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
+    with aba_lista:
+        st.caption("👆 Clique em uma linha para ver os detalhes (como no site da CVM).")
+        ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
+        cols = ["id", "data", "hora", "componente", "assunto",
+                "solicitante_nome", "acompanhantes", "status", "link"]
+        show = ordenado[cols].rename(columns={
+            "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
+            "assunto": "Assunto", "solicitante_nome": "Solicitante",
+            "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
+        event = st.dataframe(
+            show, use_container_width=True, hide_index=True, height=480,
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
+        st.download_button(
+            "⬇️ Baixar resultados (CSV)",
+            data=show.to_csv(index=False).encode("utf-8-sig"),
+            file_name="audiencias_cvm.csv", mime="text/csv")
+        sel = event.selection.rows if getattr(event, "selection", None) else []
+        if sel:
+            sel_id = int(ordenado.iloc[sel[0]]["id"])
+            if sel_id != st.session_state.get("dlg_id"):
+                st.session_state["dlg_id"] = sel_id
+                dialog_detalhe(ordenado.iloc[sel[0]])
+    with aba_panorama:
+        rr = res.dropna(subset=["data_dt"])
+        if len(rr):
+            por_mes = (rr.set_index("data_dt").resample("MS").size()
+                       .rename("Audiências").to_frame())
+            st.subheader("Audiências por mês")
+            st.line_chart(por_mes)
+            st.subheader("Top 15 componentes")
+            top = res["componente"].value_counts().head(15).sort_values()
+            st.bar_chart(top)
+        else:
+            st.info("Sem datas para exibir no panorama com os filtros atuais.")
+
+
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
+SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
+          "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
+          "📋 Atas do CGE", "📰 Informativos do Colegiado"]
+
+
 def main():
     if not autenticado():
         return
-
-    aba_painel, aba_aud, aba_pas, aba_tc, aba_ns, aba_atas, aba_inf = st.tabs(
-        ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
-         "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
-         "📋 Atas do CGE", "📰 Informativos do Colegiado"])
-
-    with aba_painel:
+    # Navegacao PREGUICOSA: so a secao selecionada e' renderizada (o st.tabs
+    # executaria todas as abas a cada carregamento, pesado demais na nuvem).
+    if hasattr(st, "segmented_control"):
+        sel = st.segmented_control("Seção", SECOES, key="nav",
+                                   default=SECOES[0], label_visibility="collapsed")
+    else:
+        sel = st.radio("Seção", SECOES, key="nav", horizontal=True,
+                       label_visibility="collapsed")
+    sel = sel or SECOES[0]
+    if sel == SECOES[0]:
         render_painel()
-
-    with aba_aud:
-        if not os.path.exists(DB_PATH):
-            st.warning("Banco de dados ainda não disponível.")
-        else:
-            df = carregar()
-            st.subheader("🏛️ Audiências Particulares — CVM")
-            st.caption(f"Base local de dados públicos da CVM • {len(df):,} audiências • "
-                       f"atualizada em {df['coletado_em'].max()}".replace(",", "."))
-            with st.expander("🔎 Filtros", expanded=True):
-                (de, ate, assunto_q, siglas, excluir, pessoa_q,
-                 status_sel) = render_filtros_aud(df)
-            res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
-
-            c1, c2 = st.columns(2)
-            c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
-            c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
-            rr = res.dropna(subset=["data_dt"])
-            if len(rr):
-                st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
-                           f"a **{rr['data_dt'].max():%d/%m/%Y}**")
-
-            aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
-
-            with aba_lista:
-                st.caption("👆 Clique em uma linha para ver os detalhes (como no site da CVM).")
-                ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
-                cols = ["id", "data", "hora", "componente", "assunto",
-                        "solicitante_nome", "acompanhantes", "status", "link"]
-                show = ordenado[cols].rename(columns={
-                    "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
-                    "assunto": "Assunto", "solicitante_nome": "Solicitante",
-                    "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
-                event = st.dataframe(
-                    show, use_container_width=True, hide_index=True, height=480,
-                    on_select="rerun", selection_mode="single-row",
-                    column_config={
-                        "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
-                st.download_button(
-                    "⬇️ Baixar resultados (CSV)",
-                    data=show.to_csv(index=False).encode("utf-8-sig"),
-                    file_name="audiencias_cvm.csv", mime="text/csv")
-                sel = event.selection.rows if getattr(event, "selection", None) else []
-                if sel:
-                    sel_id = int(ordenado.iloc[sel[0]]["id"])
-                    if sel_id != st.session_state.get("dlg_id"):
-                        st.session_state["dlg_id"] = sel_id
-                        dialog_detalhe(ordenado.iloc[sel[0]])
-
-            with aba_panorama:
-                rr = res.dropna(subset=["data_dt"])
-                if len(rr):
-                    por_mes = (rr.set_index("data_dt").resample("MS").size()
-                               .rename("Audiências").to_frame())
-                    st.subheader("Audiências por mês")
-                    st.line_chart(por_mes)
-                    st.subheader("Top 15 componentes")
-                    top = res["componente"].value_counts().head(15).sort_values()
-                    st.bar_chart(top)
-                else:
-                    st.info("Sem datas para exibir no panorama com os filtros atuais.")
-
-    with aba_pas:
+    elif sel == SECOES[1]:
+        render_audiencias()
+    elif sel == SECOES[2]:
         render_processos()
-
-    with aba_tc:
+    elif sel == SECOES[3]:
         st.subheader("🤝 Termos de Compromisso — CVM")
         render_termos()
-
-    with aba_ns:
+    elif sel == SECOES[4]:
         st.subheader("📂 Processos Não-Sancionadores — CVM")
         render_nao_sancionadores()
-
-    with aba_atas:
+    elif sel == SECOES[5]:
         render_atas()
-
-    with aba_inf:
+    elif sel == SECOES[6]:
         st.subheader("📰 Informativos do Colegiado — CVM")
         render_informativos()
 
