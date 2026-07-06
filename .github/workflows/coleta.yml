@@ -38,6 +38,7 @@ jobs:
       - name: Rodar coleta
         env:
           PAUSA: "0.2"
+          WORKERS: "6"
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
         run: |

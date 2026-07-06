@@ -196,25 +196,53 @@ def coletar_um(con, id_: int) -> str:
 # ---------------------------------------------------------------------------
 # Comandos
 # ---------------------------------------------------------------------------
+def baixar_parse(id_):
+    """Baixa e interpreta um ID (SEM tocar no banco — seguro em paralelo).
+    Retorna o registro (valido/vazio) ou None em erro de rede."""
+    try:
+        texto = baixar(id_)
+    except Exception as e:
+        print(f"  ! erro de rede no id {id_}: {e}", file=sys.stderr)
+        return None
+    if PAUSA:
+        time.sleep(PAUSA)                      # ritmo por worker
+    if eh_valido(texto):
+        return parse(id_, texto)
+    return registro_vazio(id_)
+
+
 def cmd_backfill(ini=1, fim=None):
     fim = fim or LIMITE_SUPERIOR
+    workers = int(os.environ.get("WORKERS", "1"))
     con = conectar()
     ja = ids_existentes(con)
-    print(f"[backfill] {ini}..{fim} (pausa {PAUSA}s); ja na base: {len(ja)}")
+    pend = [i for i in range(ini, fim + 1) if i not in ja]
+    print(f"[backfill] {ini}..{fim}: {len(pend)} a coletar; workers={workers}; pausa={PAUSA}s")
     feitos = 0
-    for id_ in range(ini, fim + 1):
-        if id_ in ja:
-            continue
-        estado = coletar_um(con, id_)
-        if estado != "erro":
-            feitos += 1
-        if feitos % 100 == 0 and feitos:
-            con.commit()
-            print(f"  ... {feitos} coletados (id atual={id_})")
-        time.sleep(PAUSA)
+    if workers > 1:
+        # rede em paralelo (workers threads); gravacao so na thread principal
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for reg in ex.map(baixar_parse, pend):
+                if reg is None:
+                    continue
+                upsert(con, reg)
+                feitos += 1
+                if feitos % 300 == 0:
+                    con.commit()
+                    print(f"  ... {feitos}/{len(pend)} coletados")
+    else:
+        for id_ in pend:
+            reg = baixar_parse(id_)
+            if reg is not None:
+                upsert(con, reg)
+                feitos += 1
+            if feitos and feitos % 100 == 0:
+                con.commit()
+                print(f"  ... {feitos} coletados")
     con.commit()
     con.close()
-    print(f"[backfill] concluido ({feitos} ids novos).")
+    print(f"[backfill] concluido ({feitos} ids).")
 
 
 def _ascii(texto):
