@@ -11,6 +11,8 @@ import streamlit.components.v1 as components
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
+PAS_DB_PATH = os.environ.get("PAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "processos.db"))
+URL_PAS = "https://sistemas.cvm.gov.br/asp/cvmwww/inqueritos/DetPasAndamentoSSI.asp?idProc="
 
 st.set_page_config(page_title="Audiências CVM", page_icon="🏛️", layout="wide")
 
@@ -239,6 +241,110 @@ def dialog_detalhe(row):
 
 
 # --------------------------------------------------------------------------
+# Processos Sancionadores
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def carregar_pas():
+    if not os.path.exists(PAS_DB_PATH):
+        return None, None
+    con = sqlite3.connect(PAS_DB_PATH)
+    proc = pd.read_sql("SELECT * FROM processos WHERE estado='valido'", con)
+    acus = pd.read_sql("SELECT * FROM acusados", con)
+    con.close()
+    proc["data_dt"] = pd.to_datetime(proc["data_iso"], errors="coerce")
+    proc["link"] = URL_PAS + proc["idproc"].astype(str)
+    return proc, acus
+
+
+@st.dialog("Processo Sancionador", width="large")
+def dialog_processo(row, acus):
+    st.link_button("Abrir no site da CVM ↗", row["link"])
+    e = _esc
+    linhas = [("Número", row["numero"]), ("Data de abertura", row["data_abertura"]),
+              ("Encarregado", row["encarregado"]), ("Fase atual", row["fase"]),
+              ("Subfase atual", row["subfase"]), ("Local atual", row["local_atual"]),
+              ("Objeto", row["objeto"]), ("Ementa", row["ementa"])]
+    corpo = "".join(
+        f'<tr><td class="upperHeader" style="white-space:nowrap">{k}</td>'
+        f'<td>{e(v)}</td></tr>' for k, v in linhas)
+    ac = acus[acus["idproc"] == row["idproc"]] if acus is not None else []
+    ac_rows = "".join(
+        f'<tr><td>{e(a["nome"])}</td><td>{e(a["situacao"])}</td>'
+        f'<td>{e(a["data"])}</td><td>{e(a["historico"])}</td></tr>'
+        for _, a in ac.iterrows()) if len(ac) else \
+        '<tr><td colspan="4">— sem acusados —</td></tr>'
+    doc = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
+        '</style></head><body><div id="width">'
+        f'<h2>Processo Sancionador nº {e(row["numero"])}</h2>'
+        f'<table>{corpo}</table>'
+        f'<h3>Acusados ({len(ac)})</h3>'
+        '<table><tr class="header"><td>Nome/Razão social</td><td>Situação</td>'
+        f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
+        '</div></body></html>')
+    components.html(doc, height=520 + len(ac) * 70, scrolling=True)
+
+
+def render_processos():
+    proc, acus = carregar_pas()
+    if proc is None or len(proc) == 0:
+        st.info("⏳ A base de Processos Sancionadores ainda está sendo coletada. "
+                "Volte em breve — ela cresce sozinha na nuvem.")
+        return
+    st.caption(f"{len(proc):,} processos • {len(acus):,} acusados na base"
+               .replace(",", "."))
+
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2 = st.columns(2)
+        q_txt = c1.text_input("Número ou objeto contém", key="p_txt")
+        q_acus = c2.text_input("Acusado (nome)", key="p_acus",
+                               placeholder="ex.: eduardo levy")
+        c3, c4 = st.columns(2)
+        fases = sorted(f for f in proc["fase"].dropna().unique() if f)
+        f_fase = c3.multiselect("Fase atual", fases, key="p_fase")
+        encs = sorted(x for x in proc["encarregado"].dropna().unique() if x)
+        f_enc = c4.multiselect("Encarregado (área)", encs, key="p_enc")
+
+    m = pd.Series(True, index=proc.index)
+    if q_txt.strip():
+        m &= (proc["numero"].str.contains(q_txt, case=False, na=False)
+              | proc["objeto"].str.contains(q_txt, case=False, na=False)
+              | proc["ementa"].str.contains(q_txt, case=False, na=False))
+    if f_fase:
+        m &= proc["fase"].isin(f_fase)
+    if f_enc:
+        m &= proc["encarregado"].isin(f_enc)
+    if q_acus.strip():
+        col = acus["nome"].fillna("").str.lower()
+        mk = pd.Series(True, index=acus.index)
+        for w in q_acus.lower().split():
+            mk &= col.str.contains(re.escape(w), na=False)
+        m &= proc["idproc"].isin(set(acus[mk]["idproc"]))
+
+    res = proc[m].sort_values("idproc", ascending=False).reset_index(drop=True)
+    st.metric("Processos encontrados", f"{len(res):,}".replace(",", "."))
+
+    cols = ["numero", "data_abertura", "fase", "encarregado", "acusados", "link"]
+    show = res[cols].rename(columns={
+        "numero": "Processo", "data_abertura": "Abertura", "fase": "Fase",
+        "encarregado": "Encarregado", "acusados": "Acusados", "link": "Link"})
+    st.caption("👆 Clique numa linha para ver o processo e os acusados (com histórico).")
+    ev = st.dataframe(
+        show, use_container_width=True, hide_index=True, height=460,
+        on_select="rerun", selection_mode="single-row",
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="processos_cvm.csv", mime="text/csv")
+    sel = ev.selection.rows if getattr(ev, "selection", None) else []
+    if sel:
+        sid = int(res.iloc[sel[0]]["idproc"])
+        if sid != st.session_state.get("dlg_proc"):
+            st.session_state["dlg_proc"] = sid
+            dialog_processo(res.iloc[sel[0]], acus)
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 def main():
@@ -341,54 +447,61 @@ def main():
 
     res = filtrar(df, de, ate, assunto_q, siglas, excluir, pessoa_q, status_sel)
 
-    # ---- métricas ----
-    c1, c2 = st.columns(2)
-    c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
-    c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
-    rr = res.dropna(subset=["data_dt"])
-    if len(rr):
-        st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
-                   f"a **{rr['data_dt'].max():%d/%m/%Y}**")
+    aba_aud, aba_pas = st.tabs(
+        ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores"])
 
-    aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
-
-    with aba_lista:
-        st.caption("👆 Clique em uma linha para ver os detalhes completos (como no site da CVM).")
-        ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
-        cols = ["id", "data", "hora", "componente", "assunto",
-                "solicitante_nome", "acompanhantes", "status", "link"]
-        show = ordenado[cols].rename(columns={
-            "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
-            "assunto": "Assunto", "solicitante_nome": "Solicitante",
-            "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
-        event = st.dataframe(
-            show, use_container_width=True, hide_index=True, height=480,
-            on_select="rerun", selection_mode="single-row",
-            column_config={
-                "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
-        st.download_button(
-            "⬇️ Baixar resultados (CSV)",
-            data=show.to_csv(index=False).encode("utf-8-sig"),
-            file_name="audiencias_cvm.csv", mime="text/csv")
-        sel = event.selection.rows if getattr(event, "selection", None) else []
-        if sel:
-            sel_id = int(ordenado.iloc[sel[0]]["id"])
-            if sel_id != st.session_state.get("dlg_id"):
-                st.session_state["dlg_id"] = sel_id
-                dialog_detalhe(ordenado.iloc[sel[0]])
-
-    with aba_panorama:
+    with aba_aud:
+        c1, c2 = st.columns(2)
+        c1.metric("Resultados", f"{len(res):,}".replace(",", "."))
+        c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
         rr = res.dropna(subset=["data_dt"])
         if len(rr):
-            por_mes = (rr.set_index("data_dt").resample("MS").size()
-                       .rename("Audiências").to_frame())
-            st.subheader("Audiências por mês")
-            st.line_chart(por_mes)
-            st.subheader("Top 15 componentes")
-            top = res["componente"].value_counts().head(15).sort_values()
-            st.bar_chart(top)
-        else:
-            st.info("Sem datas para exibir no panorama com os filtros atuais.")
+            st.caption(f"📅 Período dos resultados: **{rr['data_dt'].min():%d/%m/%Y}** "
+                       f"a **{rr['data_dt'].max():%d/%m/%Y}**")
+
+        aba_lista, aba_panorama = st.tabs(["📋 Resultados", "📊 Panorama"])
+
+        with aba_lista:
+            st.caption("👆 Clique em uma linha para ver os detalhes (como no site da CVM). "
+                       "⚠️ Os filtros na barra lateral são desta aba (Audiências).")
+            ordenado = res.sort_values("id", ascending=False).reset_index(drop=True)
+            cols = ["id", "data", "hora", "componente", "assunto",
+                    "solicitante_nome", "acompanhantes", "status", "link"]
+            show = ordenado[cols].rename(columns={
+                "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
+                "assunto": "Assunto", "solicitante_nome": "Solicitante",
+                "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
+            event = st.dataframe(
+                show, use_container_width=True, hide_index=True, height=480,
+                on_select="rerun", selection_mode="single-row",
+                column_config={
+                    "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
+            st.download_button(
+                "⬇️ Baixar resultados (CSV)",
+                data=show.to_csv(index=False).encode("utf-8-sig"),
+                file_name="audiencias_cvm.csv", mime="text/csv")
+            sel = event.selection.rows if getattr(event, "selection", None) else []
+            if sel:
+                sel_id = int(ordenado.iloc[sel[0]]["id"])
+                if sel_id != st.session_state.get("dlg_id"):
+                    st.session_state["dlg_id"] = sel_id
+                    dialog_detalhe(ordenado.iloc[sel[0]])
+
+        with aba_panorama:
+            rr = res.dropna(subset=["data_dt"])
+            if len(rr):
+                por_mes = (rr.set_index("data_dt").resample("MS").size()
+                           .rename("Audiências").to_frame())
+                st.subheader("Audiências por mês")
+                st.line_chart(por_mes)
+                st.subheader("Top 15 componentes")
+                top = res["componente"].value_counts().head(15).sort_values()
+                st.bar_chart(top)
+            else:
+                st.info("Sem datas para exibir no panorama com os filtros atuais.")
+
+    with aba_pas:
+        render_processos()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,9 @@ on:
       modo:
         description: "atualizar (padrao) ou backfill"
         default: "atualizar"
+      fonte:
+        description: "no backfill: audiencias (padrao) ou processos"
+        default: "audiencias"
       ini:
         description: "id inicial (so no backfill)"
         default: "1"
@@ -43,12 +46,21 @@ jobs:
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
         run: |
           modo="${{ github.event.inputs.modo }}"
+          fonte="${{ github.event.inputs.fonte }}"
           if [ "$modo" = "backfill" ]; then
-            python scraper.py backfill "${{ github.event.inputs.ini }}" "${{ github.event.inputs.fim }}"
+            if [ "$fonte" = "processos" ]; then
+              python scraper_pas.py backfill "${{ github.event.inputs.ini }}" "${{ github.event.inputs.fim }}"
+              python scraper_pas.py stats
+            else
+              python scraper.py backfill "${{ github.event.inputs.ini }}" "${{ github.event.inputs.fim }}"
+              python scraper.py stats
+            fi
           else
             python scraper.py atualizar
+            python scraper_pas.py atualizar
+            python scraper.py stats
+            python scraper_pas.py stats
           fi
-          python scraper.py stats
 
       - name: Avisar falha no WhatsApp
         if: failure()
@@ -62,7 +74,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add audiencias.db
+          git add audiencias.db processos.db
           if git diff --cached --quiet; then
             echo "Sem mudancas na base."
           else
