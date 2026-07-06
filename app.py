@@ -18,6 +18,7 @@ ATAS_DB_PATH = os.environ.get("ATAS_DB_PATH", os.path.join(os.path.dirname(os.pa
 INF_DB_PATH = os.environ.get("INF_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "informativos.db"))
 TERMOS_DB_PATH = os.environ.get("TERMOS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "termos.db"))
 JULGAR_DB_PATH = os.environ.get("JULGAR_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "julgar.db"))
+QUEM_DB_PATH = os.environ.get("QUEM_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "quem.db"))
 
 st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
@@ -1139,6 +1140,42 @@ def carregar_julgados():
 
 
 @st.cache_data(ttl=300)
+def carregar_quem():
+    if not os.path.exists(QUEM_DB_PATH):
+        return None
+    con = sqlite3.connect(QUEM_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM quem", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def colegiado_atual():
+    """Membros atuais do Colegiado (Presidente + Diretores) — os únicos que
+    PODEM ser relator agora, conforme o Quem é Quem. Retorna lista de dicts."""
+    df = carregar_quem()
+    if df is None or len(df) == 0:
+        return []
+    board = df[df["e_relator"] == 1]
+    return [{"nome": r["nome"], "sigla": r["sigla"], "cargo": r["cargo"]}
+            for _, r in board.iterrows()]
+
+
+def relator_no_colegiado(nome_oficial):
+    """Casa o nome oficial de um relator com um membro atual do Colegiado
+    (por sobrenome). Retorna o membro ou None."""
+    alvo = set(_slug(nome_oficial).split())
+    for m in colegiado_atual():
+        toks = [t for t in _slug(m["nome"]).split() if len(t) >= 3]
+        if toks and toks[-1] in alvo and (len(toks) == 1 or toks[0] in alvo):
+            return m
+    return None
+
+
+@st.cache_data(ttl=300)
 def mapa_diretores():
     """sigla de diretor -> nome (o mais frequente nos informativos; filtra ruído)."""
     if not os.path.exists(INF_DB_PATH):
@@ -1192,15 +1229,21 @@ def calcular_inconsistencias():
     """Compara 'processos a julgar' (oficial) com o que temos, comparando por PESSOA
     (agrega, p.ex., Otto Lobo aparecendo como PTE e como DOL)."""
     jul, _ = carregar_julgar()
-    res = {"divergente": [], "sem_relator": [], "tc_aceito": [], "ja_julgado": []}
+    res = {"divergente": [], "sem_relator": [], "tc_aceito": [], "ja_julgado": [],
+           "relator_fora": []}
     if jul is None or len(jul) == 0:
         return res
     mrel = mapa_relator_atual()
     mtc = mapa_tc()
     julg = carregar_julgados()
     set_julg = set(julg["proc_norm"]) - {""} if julg is not None else set()
+    tem_board = len(colegiado_atual()) > 0
     for _, r in jul.iterrows():
         pn = r["proc_norm"]
+        # relator oficial precisa ser um membro atual do Colegiado (Quem é Quem)
+        if tem_board and not relator_no_colegiado(r["relator_nome"]):
+            res["relator_fora"].append({
+                "processo": r["processo"], "relator": r["relator_nome"]})
         ofic_nome = pessoa_de_nome(r["relator_nome"])
         deduz = mrel.get(pn, ("", ""))[:2] if pn else ("", "")
         ded_sigla, ded_data = deduz
@@ -1270,8 +1313,8 @@ def render_painel():
     else:
         inc = calcular_inconsistencias()
         d, s, t = inc["divergente"], inc["sem_relator"], inc["tc_aceito"]
-        jj = inc["ja_julgado"]
-        m1, m2, m3, m4 = st.columns(4)
+        jj, rf = inc["ja_julgado"], inc["relator_fora"]
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("🔀 Relator divergente", len(d),
                   help="Relator oficial (a julgar) ≠ relator deduzido dos informativos (por pessoa).")
         m2.metric("❓ Sem relator deduzido", len(s),
@@ -1280,6 +1323,13 @@ def render_painel():
                   help="Processo com Termo de Compromisso aceito ainda listado a julgar.")
         m4.metric("♻️ Já julgado mas a julgar", len(jj),
                   help="Processo que consta na lista oficial de julgados E na de a julgar.")
+        m5.metric("🚫 Relator fora do Colegiado", len(rf),
+                  help="Relator oficial que NÃO é membro atual do Colegiado (Quem é Quem).")
+        if rf:
+            st.markdown("**🚫 Relator que não está no Colegiado atual (Quem é Quem):**")
+            st.dataframe(pd.DataFrame(rf).rename(columns={
+                "processo": "Processo", "relator": "Relator oficial"}),
+                use_container_width=True, hide_index=True)
         if jj:
             st.markdown("**♻️ Consta como já julgado e ainda listado a julgar:**")
             st.dataframe(pd.DataFrame(jj).rename(columns={
@@ -1305,7 +1355,7 @@ def render_painel():
                     "processo": "Processo", "relator": "Relator oficial",
                     "tipo": "Tipo", "inicio": "Início"}),
                     use_container_width=True, hide_index=True)
-        if not (d or s or t or jj):
+        if not (d or s or t or jj or rf):
             st.success("Nenhuma inconsistência detectada. 🎉")
 
     st.divider()
@@ -1327,6 +1377,60 @@ def render_painel():
         st.dataframe(show, use_container_width=True, hide_index=True, height=360)
         st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                            file_name="processos_a_julgar.csv", mime="text/csv")
+
+
+def render_quem():
+    st.subheader("👥 Quem é Quem — CVM")
+    df = carregar_quem()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base do Quem é Quem ainda não está disponível.")
+        return
+    nrel = int((df["e_relator"] == 1).sum())
+    st.caption(f"{len(df)} pessoas do organograma da CVM • {nrel} no Colegiado "
+               "(Presidente + Diretores — os únicos que podem ser relator). "
+               "Fonte: gov.br/cvm • Quem é Quem.")
+    # relatoria: quantos processos 'a julgar' cada membro do Colegiado tem
+    jul, _ = carregar_julgar()
+    cont_jul = {}
+    if jul is not None and len(jul):
+        for _, r in jul.iterrows():
+            m = relator_no_colegiado(r["relator_nome"])
+            if m:
+                cont_jul[m["sigla"]] = cont_jul.get(m["sigla"], 0) + 1
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2 = st.columns([2, 1])
+        q = c1.text_input("Buscar (nome, cargo, sigla, e-mail)", key="qq_q")
+        so_col = c2.checkbox("Só o Colegiado (relatores)", key="qq_col")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        alvo = (df["nome"].fillna("") + " " + df["cargo"].fillna("") + " "
+                + df["sigla"].fillna("") + " " + df["email"].fillna("")).str.lower()
+        for w in q.lower().split():
+            m &= alvo.str.contains(re.escape(w), na=False)
+    if so_col:
+        m &= df["e_relator"] == 1
+    res = df[m].copy()
+    res["a_julgar"] = res.apply(
+        lambda r: cont_jul.get(r["sigla"], 0) if r["e_relator"] == 1 else None, axis=1)
+    res = res.sort_values(["e_relator", "cargo"], ascending=[False, True])
+    st.metric("Pessoas encontradas", len(res))
+    if nrel:
+        st.markdown("**⚖️ Colegiado atual** (quem pode ser relator):")
+        board = res[res["e_relator"] == 1][["nome", "cargo", "sigla", "email", "a_julgar"]]
+        st.dataframe(board.rename(columns={
+            "nome": "Nome", "cargo": "Cargo", "sigla": "Sigla", "email": "E-mail",
+            "a_julgar": "Processos a julgar"}),
+            use_container_width=True, hide_index=True)
+    cols = ["nome", "cargo", "sigla", "email", "telefone", "perfil"]
+    show = res[cols].rename(columns={
+        "nome": "Nome", "cargo": "Cargo", "sigla": "Sigla", "email": "E-mail",
+        "telefone": "Telefone", "perfil": "Perfil"})
+    st.caption("Organograma completo:")
+    st.dataframe(
+        show, use_container_width=True, hide_index=True, height=420,
+        column_config={"Perfil": st.column_config.LinkColumn("Perfil", display_text="abrir ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="quem_e_quem_cvm.csv", mime="text/csv")
 
 
 def render_audiencias():
@@ -1394,7 +1498,7 @@ def render_audiencias():
 # --------------------------------------------------------------------------
 SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
-          "📋 Atas do CGE", "📰 Informativos do Colegiado"]
+          "📋 Atas do CGE", "📰 Informativos do Colegiado", "👥 Quem é Quem"]
 
 
 def main():
@@ -1426,6 +1530,8 @@ def main():
     elif sel == SECOES[6]:
         st.subheader("📰 Informativos do Colegiado — CVM")
         render_informativos()
+    elif sel == SECOES[7]:
+        render_quem()
 
 
 if __name__ == "__main__":
