@@ -435,9 +435,9 @@ def render_filtros_aud(df):
     dmin = validas["data_dt"].min().date() if len(validas) else dt.date(1948, 1, 1)
     dmax = validas["data_dt"].max().date() if len(validas) else dt.date.today()
     hoje = dt.date.today()
-    cp, cd = st.columns([1, 2])
-    atalho = cp.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
-                                  "Futuro", "Personalizado"], index=0, key="f_periodo")
+    atalho = st.radio("Período", ["Tudo", "Hoje", "Esta semana", "Este mês",
+                                  "Futuro", "Personalizado"], index=0,
+                      key="f_periodo", horizontal=True)
     de = ate = None
     if atalho == "Hoje":
         de = ate = hoje
@@ -450,10 +450,11 @@ def render_filtros_aud(df):
     elif atalho == "Futuro":
         de = hoje + dt.timedelta(days=1)
     elif atalho == "Personalizado":
-        de = cd.date_input("De (data inicial)", value=None, key="f_de",
-                           min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
-        ate = cd.date_input("Até (data final)", value=None, key="f_ate",
+        cda, cdb = st.columns(2)
+        de = cda.date_input("De (data inicial)", value=None, key="f_de",
                             min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
+        ate = cdb.date_input("Até (data final)", value=None, key="f_ate",
+                             min_value=dmin, max_value=dmax, format="DD/MM/YYYY")
     sugerir = st.checkbox(
         "💡 Autocomplete (sugerir da base)", value=False, key="f_sugerir",
         help="Sugestões da base ao digitar; clicar adiciona. Desligado = texto livre.")
