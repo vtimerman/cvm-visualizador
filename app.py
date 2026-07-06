@@ -3,6 +3,7 @@
 import os
 import re
 import sqlite3
+import unicodedata
 import datetime as dt
 
 import pandas as pd
@@ -16,6 +17,7 @@ URL_PAS = "https://sistemas.cvm.gov.br/asp/cvmwww/inqueritos/DetPasAndamentoSSI.
 ATAS_DB_PATH = os.environ.get("ATAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "atas.db"))
 INF_DB_PATH = os.environ.get("INF_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "informativos.db"))
 TERMOS_DB_PATH = os.environ.get("TERMOS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "termos.db"))
+JULGAR_DB_PATH = os.environ.get("JULGAR_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "julgar.db"))
 
 st.set_page_config(page_title="Audiências CVM", page_icon="🏛️", layout="wide")
 
@@ -1054,16 +1056,191 @@ def render_filtros_aud(df):
 
 
 # --------------------------------------------------------------------------
+# Painel / Dashboard
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def carregar_julgar():
+    if not os.path.exists(JULGAR_DB_PATH):
+        return None, {}
+    con = sqlite3.connect(JULGAR_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM a_julgar", con)
+        meta = dict(con.execute("SELECT chave,valor FROM julgar_meta").fetchall())
+    except Exception:
+        df, meta = None, {}
+    con.close()
+    return df, meta
+
+
+@st.cache_data(ttl=300)
+def mapa_siglas():
+    """sigla -> nome do diretor (mais recente), das legendas dos informativos."""
+    if not os.path.exists(INF_DB_PATH):
+        return {}
+    con = sqlite3.connect(INF_DB_PATH)
+    try:
+        rows = con.execute("SELECT sigla,nome,data_iso FROM siglas").fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    melhor = {}
+    for sigla, nome, di in sorted(rows, key=lambda r: r[2] or ""):
+        melhor[sigla] = nome
+    return melhor
+
+
+def _slug(s):
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", s.lower()).strip()
+
+
+def sigla_de_nome(nome_oficial):
+    """Mapeia o nome oficial do relator (planilha) para a sigla (informativos)."""
+    alvo = set(_slug(nome_oficial).split())
+    for sigla, curto in mapa_siglas().items():
+        toks = [t for t in _slug(curto).split() if len(t) >= 3]
+        if toks and toks[-1] in alvo and (len(toks) == 1 or toks[0] in alvo):
+            return sigla
+    return ""
+
+
+@st.cache_data(ttl=300)
+def calcular_inconsistencias():
+    """Compara 'processos a julgar' (oficial) com o que temos nas outras bases."""
+    jul, _ = carregar_julgar()
+    res = {"divergente": [], "sem_relator": [], "tc_aceito": []}
+    if jul is None or len(jul) == 0:
+        return res
+    mrel = mapa_relator_atual()
+    mtc = mapa_tc()
+    msig = mapa_siglas()
+    for _, r in jul.iterrows():
+        pn = r["proc_norm"]
+        oficial = sigla_de_nome(r["relator_nome"])
+        deduz = mrel.get(pn, ("",))[0] if pn else ""
+        if oficial and deduz and oficial != deduz:
+            res["divergente"].append({
+                "processo": r["processo"], "oficial": oficial,
+                "oficial_nome": r["relator_nome"], "deduzido": deduz,
+                "deduzido_nome": msig.get(deduz, deduz),
+                "desde": mrel.get(pn, ("", ""))[1] if pn else ""})
+        elif pn and not deduz:
+            res["sem_relator"].append({
+                "processo": r["processo"], "relator": r["relator_nome"],
+                "tipo": r["tipo"], "inicio": r["dt_inicio"]})
+        if pn and "Aceito" in mtc.get(pn, ""):
+            res["tc_aceito"].append({
+                "processo": r["processo"], "relator": r["relator_nome"]})
+    return res
+
+
+def _card(col, titulo, valor, sub=""):
+    col.metric(titulo, valor, help=sub if sub else None)
+    if sub:
+        col.caption(sub)
+
+
+def render_painel():
+    st.subheader("📊 Painel — visão geral")
+    aud = carregar()
+    proc, _ = carregar_pas()
+    tc = carregar_termos()
+    inf = carregar_informativos()
+    atas = carregar_atas()
+    jul, jmeta = carregar_julgar()
+    ns = agregar_nao_sancionadores()
+
+    st.markdown("#### 🗂️ Bases")
+    c = st.columns(4)
+    _card(c[0], "🏛️ Audiências", f"{len(aud):,}".replace(",", ".") if aud is not None else "—",
+          f"até {aud['data_dt'].max():%d/%m/%Y}" if aud is not None and aud["data_dt"].notna().any() else "")
+    _card(c[1], "⚖️ Sancionadores", f"{len(proc):,}".replace(",", ".") if proc is not None else "—",
+          "base em coleta")
+    ntc = len(tc) if tc is not None else 0
+    na = int((tc["situacao"] == "Aceito").sum()) if tc is not None else 0
+    _card(c[2], "🤝 Termos Compr.", f"{ntc:,}".replace(",", "."),
+          f"{na} aceitos · {ntc - na} rejeitados" if tc is not None else "")
+    _card(c[3], "📂 Não-Sancion.", f"{len(ns):,}".replace(",", ".") if ns is not None else "—",
+          "processos")
+    c = st.columns(4)
+    ninf = len(inf) if inf is not None else 0
+    iia = int((inf["ai_feito"] == 1).sum()) if inf is not None else 0
+    _card(c[0], "📰 Informativos", f"{ninf:,}".replace(",", "."),
+          f"deliberações · {iia} com IA")
+    _card(c[1], "📋 Atas CGE", f"{len(atas):,}".replace(",", ".") if atas is not None else "—",
+          f"{int((atas['ai_feito'] == 1).sum())} com IA" if atas is not None else "")
+    njul = len(jul) if jul is not None else 0
+    _card(c[2], "⚖️ A Julgar", f"{njul}", jmeta.get("atualizado_em", ""))
+    nrel = jul["relator_nome"].nunique() if jul is not None and len(jul) else 0
+    _card(c[3], "👤 Relatores (a julgar)", f"{nrel}",
+          jmeta.get("titulo", "")[:30])
+
+    st.divider()
+    st.markdown("#### ⚠️ Inconsistências")
+    if jul is None or len(jul) == 0:
+        st.info("A base 'Processos a Julgar' ainda não está disponível.")
+    else:
+        inc = calcular_inconsistencias()
+        d, s, t = inc["divergente"], inc["sem_relator"], inc["tc_aceito"]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🔀 Relator divergente", len(d),
+                  help="Relator oficial (a julgar) ≠ relator deduzido dos informativos.")
+        m2.metric("❓ Sem relator deduzido", len(s),
+                  help="Processo a julgar sem relator identificado nos informativos.")
+        m3.metric("✅ TC aceito mas a julgar", len(t),
+                  help="Processo com Termo de Compromisso aceito ainda listado a julgar.")
+        if d:
+            st.markdown("**🔀 Relator divergente** — o oficial diverge do que deduzimos:")
+            st.dataframe(pd.DataFrame(d).rename(columns={
+                "processo": "Processo", "oficial": "Oficial", "oficial_nome": "Relator oficial",
+                "deduzido": "Deduzido", "deduzido_nome": "Deduzido (nome)", "desde": "Deduz. desde"}),
+                use_container_width=True, hide_index=True)
+        if t:
+            st.markdown("**✅ TC aceito mas ainda listado a julgar:**")
+            st.dataframe(pd.DataFrame(t).rename(columns={
+                "processo": "Processo", "relator": "Relator oficial"}),
+                use_container_width=True, hide_index=True)
+        if s:
+            with st.expander(f"❓ {len(s)} processos a julgar sem relator deduzido nos informativos"):
+                st.dataframe(pd.DataFrame(s).rename(columns={
+                    "processo": "Processo", "relator": "Relator oficial",
+                    "tipo": "Tipo", "inicio": "Início"}),
+                    use_container_width=True, hide_index=True)
+        if not (d or s or t):
+            st.success("Nenhuma inconsistência detectada. 🎉")
+
+    st.divider()
+    st.markdown("#### ⚖️ Processos a julgar (fonte oficial CVM)")
+    if jul is not None and len(jul):
+        st.caption(f"{jmeta.get('titulo', '')} · fonte: {jmeta.get('fonte', '')}")
+        msig = mapa_siglas()
+        mrel = mapa_relator_atual()
+        v = jul.copy()
+        v["Deduzido (informativos)"] = v.apply(
+            lambda r: mrel.get(r["proc_norm"], ("",))[0], axis=1)
+        show = v[["relator_nome", "processo", "tipo", "rito", "dt_inicio",
+                  "Deduzido (informativos)"]].rename(columns={
+            "relator_nome": "Relator oficial", "processo": "Processo",
+            "tipo": "Tipo", "rito": "Rito", "dt_inicio": "Início"})
+        st.dataframe(show, use_container_width=True, hide_index=True, height=360)
+        st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="processos_a_julgar.csv", mime="text/csv")
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 def main():
     if not autenticado():
         return
 
-    aba_aud, aba_pas, aba_tc, aba_ns, aba_atas, aba_inf = st.tabs(
-        ["🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
+    aba_painel, aba_aud, aba_pas, aba_tc, aba_ns, aba_atas, aba_inf = st.tabs(
+        ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
          "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
          "📋 Atas do CGE", "📰 Informativos do Colegiado"])
+
+    with aba_painel:
+        render_painel()
 
     with aba_aud:
         if not os.path.exists(DB_PATH):

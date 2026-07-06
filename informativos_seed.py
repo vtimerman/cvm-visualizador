@@ -113,6 +113,9 @@ def conectar():
         proc_norm TEXT, processo TEXT, reg TEXT, relator TEXT, evento TEXT,
         arquivo TEXT, inf_numero TEXT, data TEXT, data_iso TEXT,
         UNIQUE(proc_norm, arquivo, relator, evento))""")
+    # mapa sigla <-> nome do diretor/presidente (das legendas dos informativos)
+    con.execute("""CREATE TABLE IF NOT EXISTS siglas(
+        sigla TEXT, nome TEXT, data_iso TEXT, UNIQUE(sigla, nome))""")
     con.commit()
     return con
 
@@ -220,11 +223,28 @@ def eventos_sorteio(texto):
     return out
 
 
+RE_LEGENDA = re.compile(
+    r"\b(PTE|D[A-Z]{2,3})\s*[–-]\s*"
+    r"(?:Pres\.|Dir\.\s*Subst\.|Dir\.|Diretor[a]?|Presidente)\s+"
+    r"([A-ZÀ-Ú][A-Za-zÀ-ú.\s]{3,45}?)(?=\s*/|\s*\(|\s*\n|$)")
+
+
+def legendas(texto):
+    """Extrai pares (sigla, nome) das linhas de legenda 'SIGLA – Dir. Nome'."""
+    out = {}
+    for sigla, nome in RE_LEGENDA.findall(texto):
+        nome = re.sub(r"\s+", " ", nome).strip(" .")
+        if len(nome) >= 4 and " " in nome:
+            out[sigla] = nome
+    return out
+
+
 def construir():
     con = conectar()
     links = mapa_links()
     hoje = dt.date.today().isoformat()
     con.execute("DELETE FROM relatores")  # reconstroi o mapa de relatoria por completo
+    con.execute("DELETE FROM siglas")
     n_arq = n_del = n_rel = 0
     for txt in sorted(glob.glob(os.path.join(TXT_DIR, "*.txt"))):
         base = os.path.splitext(os.path.basename(txt))[0]
@@ -233,6 +253,10 @@ def construir():
         link = links.get(base, "")
         itens = fatiar(texto)
         n_arq += 1
+        # legendas sigla<->nome (para cruzar com "processos a julgar")
+        for sigla, nome in legendas(texto).items():
+            con.execute("INSERT OR IGNORE INTO siglas(sigla,nome,data_iso) "
+                        "VALUES(?,?,?)", (sigla, nome, data_iso))
         # eventos de relatoria: sorteios/redistribuicoes (topo do informativo)
         for reg, proc, sigla in eventos_sorteio(texto):
             pn = norm_proc(proc)
