@@ -1877,30 +1877,49 @@ def render_noticias():
         st.info("⏳ A base de notícias ainda está sendo populada.")
         return
     nsanc = int(df["categoria"].str.contains("SANCION", case=False, na=False).sum())
+    # nº de processo citado no corpo (só nos últimos ~2 anos, que têm corpo)
+    tem_corpo = "corpo" in df.columns
+    if tem_corpo:
+        df = df.copy()
+        df["_procs"] = df["corpo"].apply(
+            lambda c: "; ".join(_nx.extrair_procs(c)[:6]) if c else "")
+        n_cita = int((df["_procs"] != "").sum())
+    else:
+        df["_procs"] = ""
+        n_cita = 0
     st.caption(f"{len(df):,} notícias publicadas pela CVM • {nsanc} de atividade "
-               "sancionadora. Fonte: gov.br/cvm • Notícias.".replace(",", "."))
+               f"sancionadora • {n_cita} citam um nº de processo (corpo lido nos "
+               "últimos 2 anos). Fonte: gov.br/cvm • Notícias.".replace(",", "."))
     with st.expander("🔎 Filtros", expanded=True):
         c1, c2 = st.columns([2, 1])
-        q = c1.text_input("Buscar (título, resumo, tags)", key="nt_q",
-                          help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+        q = c1.text_input("Buscar (título, resumo, corpo, tags)", key="nt_q",
+                          help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU. '
+                               "Busca também no corpo das notícias dos últimos 2 anos.")
         cats = sorted(c for c in df["categoria"].dropna().unique() if c)
         f_cat = c2.multiselect("Categoria", cats, key="nt_cat",
                                help="Ex.: ATIVIDADE SANCIONADORA, ALERTA AO MERCADO…")
         c3, c4 = st.columns(2)
         anos = sorted({a[:4] for a in df["data_iso"].dropna() if a}, reverse=True)
         f_ano = c3.multiselect("Ano", anos, key="nt_ano")
+        so_proc = c4.checkbox("📌 Só as que citam um processo", value=False,
+                              key="nt_soproc",
+                              help="Notícias (últimos 2 anos) que mencionam um nº de "
+                                   "processo no corpo.")
+    campos_busca = ["titulo", "resumo", "tags"] + (["corpo"] if tem_corpo else [])
     m = pd.Series(True, index=df.index)
     if q.strip():
-        m &= match_busca(df, ["titulo", "resumo", "tags"], q)
+        m &= match_busca(df, campos_busca, q)
     if f_cat:
         m &= df["categoria"].isin(f_cat)
     if f_ano:
         m &= df["data_iso"].str[:4].isin(f_ano)
+    if so_proc:
+        m &= df["_procs"] != ""
     res = df[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
     st.metric("Notícias encontradas", f"{len(res):,}".replace(",", "."))
-    show = res[["data", "categoria", "titulo", "resumo", "url"]].rename(columns={
+    show = res[["data", "categoria", "titulo", "_procs", "url"]].rename(columns={
         "data": "Data", "categoria": "Categoria", "titulo": "Título",
-        "resumo": "Resumo", "url": "Link"})
+        "_procs": "Processos citados", "url": "Link"})
     tabela(
         show, datas=["Data"], use_container_width=True, hide_index=True, height=460,
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
