@@ -523,16 +523,25 @@ def render_processos_lista():
     st.caption(f"{len(proc):,} processos • {len(acus):,} acusados na base"
                .replace(",", "."))
 
+    # relator (pessoa) por processo — deduzido dos Informativos
+    mapa_rel = mapa_relator_atual()
+    proc = proc.copy()
+    proc["_relator"] = proc["numero"].map(
+        lambda n: pessoa_de_sigla(*mapa_rel.get(_norm_proc(n), ("", ""))[:2])
+        if mapa_rel.get(_norm_proc(n)) else "")
     with st.expander("🔎 Filtros", expanded=True):
         c1, c2 = st.columns(2)
         q_txt = c1.text_input("Número ou objeto contém", key="p_txt")
         q_acus = c2.text_input("Acusado (nome)", key="p_acus",
                                placeholder="ex.: eduardo levy")
-        c3, c4 = st.columns(2)
+        c3, c4, c5 = st.columns(3)
         fases = sorted(f for f in proc["fase"].dropna().unique() if f)
         f_fase = c3.multiselect("Fase atual", fases, key="p_fase")
         encs = sorted(x for x in proc["encarregado"].dropna().unique() if x)
         f_enc = c4.multiselect("Encarregado (área)", encs, key="p_enc")
+        rels = sorted(r for r in proc["_relator"].dropna().unique() if r)
+        f_rel = c5.multiselect("Relator (informativos)", rels, key="p_rel",
+                               help="Relator atual deduzido dos Informativos.")
 
     m = pd.Series(True, index=proc.index)
     if q_txt.strip():
@@ -543,6 +552,8 @@ def render_processos_lista():
         m &= proc["fase"].isin(f_fase)
     if f_enc:
         m &= proc["encarregado"].isin(f_enc)
+    if f_rel:
+        m &= proc["_relator"].isin(f_rel)
     if q_acus.strip():
         col = acus["nome"].fillna("").str.lower()
         mk = pd.Series(True, index=acus.index)
@@ -551,8 +562,6 @@ def render_processos_lista():
         m &= proc["idproc"].isin(set(acus[mk]["idproc"]))
 
     res = proc[m].sort_values("idproc", ascending=False).reset_index(drop=True)
-    # cruzamentos: relator atual (Informativos) e situação do Termo de Compromisso
-    mapa_rel = mapa_relator_atual()
     m_tc = mapa_tc()
     res["relator_atual"] = res["numero"].map(
         lambda n: mapa_rel.get(_norm_proc(n), ("",))[0])
@@ -1870,9 +1879,32 @@ def processos_do_relator(nome_pessoa):
             "Processo": proc_disp.get(pn, pn), "Sigla": info[0],
             "Relator desde": info[1], "Relator há (dias)": _dias_desde(info[1]),
             "Abertura do processo": abertura or (f"(ano {ano})" if ano else "—"),
-            "Aberto há (dias)": _dias_desde(abertura), "Trocas": info[5]})
+            "Aberto há (dias)": _dias_desde(abertura), "Trocas": info[5], "_pn": pn})
     return sorted(out, key=lambda x: (x["Relator há (dias)"] is None,
                                       -(x["Relator há (dias)"] or 0)))
+
+
+def sobre_processo(pn):
+    """Do que se trata: objeto (base de Sancionadores) + deliberações nos Informativos."""
+    objeto = ""
+    proc, _ = carregar_pas()
+    if proc is not None and pn:
+        hit = proc[proc["numero"].map(_norm_proc) == pn]
+        if len(hit):
+            r0 = hit.iloc[0]
+            objeto = str(r0.get("objeto", "") or "").strip() or str(r0.get("ementa", "") or "").strip()
+    delibs = []
+    if pn and os.path.exists(INF_DB_PATH):
+        con = sqlite3.connect(INF_DB_PATH)
+        try:
+            delibs = con.execute(
+                "SELECT data,inf_numero,tipo,assunto,resumo,decisao,link "
+                "FROM deliberacoes WHERE proc_norm=? ORDER BY data_iso DESC", (pn,)
+            ).fetchall()
+        except Exception:
+            delibs = []
+        con.close()
+    return objeto, delibs
 
 
 def impedimentos_da_pessoa(nome_pessoa):
@@ -1902,12 +1934,35 @@ def dialog_relator(nome, cargo, sigla):
     c2.metric("Impedimentos / suspeições declarados", len(imped))
     st.markdown("#### ⚖️ Processos sob relatoria")
     st.caption("*Relator desde* = última vez sorteado/redistribuído relator. *Abertura* "
-               "= do processo sancionador (ou o ano do nº). Colunas de tempo em **dias** "
-               "(clique no cabeçalho para ordenar pelo total de dias).")
+               "= do processo sancionador. Colunas de tempo em **dias**. "
+               "👆 **Clique numa linha para ver do que o processo se trata.**")
     if procs:
-        tabela(pd.DataFrame(procs), datas=["Relator desde"],
-               dias=["Relator há (dias)", "Aberto há (dias)"],
-               use_container_width=True, hide_index=True)
+        dfp = pd.DataFrame(procs)
+        evp = tabela(dfp.drop(columns=["_pn"]), datas=["Relator desde"],
+                     dias=["Relator há (dias)", "Aberto há (dias)"],
+                     use_container_width=True, hide_index=True, key="dlg_procs_sel",
+                     on_select="rerun", selection_mode="single-row")
+        selp = evp.selection.rows if getattr(evp, "selection", None) else []
+        if selp and selp[0] < len(dfp):
+            row = dfp.iloc[selp[0]]
+            objeto, delibs = sobre_processo(row["_pn"])
+            st.markdown(f"##### 📄 Processo {row['Processo']} — do que se trata")
+            if objeto:
+                st.markdown(f"**Objeto:** {objeto}")
+            if delibs:
+                st.caption(f"{len(delibs)} deliberação(ões) nos Informativos:")
+                for data, inf, tipo, assunto, resumo, decisao, link in delibs:
+                    st.markdown(f"**{data}** · Inf. nº {inf} · {tipo}")
+                    if str(resumo).strip():
+                        st.markdown(f"**Resumo (IA):** {resumo}")
+                    elif str(assunto).strip():
+                        st.markdown(f"*{assunto}*")
+                    if str(decisao).strip():
+                        st.info(decisao)
+                    if link:
+                        st.caption(f"[Abrir PDF do informativo ↗]({link})")
+            if not objeto and not delibs:
+                st.info("Sem descrição adicional para este processo nas bases atuais.")
     else:
         st.info("Nenhum processo com esta pessoa como relator atual nos informativos.")
     st.markdown("#### 🚫 Impedimentos e suspeições")
