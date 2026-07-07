@@ -307,6 +307,35 @@ def cmd_atualizar():
     print(f"[pas atualizar] concluido ({novos} novo(s)).")
 
 
+def cmd_revarrer(ini=1, fim=None):
+    """Re-varre os ids VAZIOS (e lacunas) de uma faixa, IGNORANDO o cache, para
+    capturar processos que passaram a existir em ids antes vazios (a CVM pode
+    'preencher' ids baixos) e estender o teto. Nao re-baixa os ja validos."""
+    fim = fim or (LIMITE + 500)
+    con = conectar()
+    validos = {r[0] for r in con.execute(
+        "SELECT idproc FROM processos WHERE estado='valido'")}
+    alvo = [i for i in range(ini, fim + 1) if i not in validos]
+    print(f"[pas revarrer] {ini}..{fim}: {len(alvo)} ids vazios/novos; workers={WORKERS}")
+    novos = feitos = 0
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(WORKERS, 1)) as ex:
+        for res in ex.map(baixar_parse_full, alvo):
+            if res is None:
+                continue
+            _gravar(con, res[0], res[1])
+            feitos += 1
+            if res[0]["estado"] == "valido":
+                novos += 1
+                print(f"  novo/atualizado idProc={res[0]['idproc']} ({res[0]['numero']})")
+            if feitos % 300 == 0:
+                con.commit()
+                print(f"  ... {feitos}/{len(alvo)}")
+    con.commit()
+    con.close()
+    print(f"[pas revarrer] concluido: {novos} processo(s) novo(s) em ids antes vazios.")
+
+
 def cmd_um(idp):
     res = baixar_parse_full(idp)
     if not res:
@@ -345,6 +374,10 @@ if __name__ == "__main__":
         cmd_backfill(ini, fim)
     elif cmd == "atualizar":
         cmd_atualizar()
+    elif cmd == "revarrer":
+        ini = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        fim = int(sys.argv[3]) if len(sys.argv) > 3 else None
+        cmd_revarrer(ini, fim)
     elif cmd == "um":
         cmd_um(int(sys.argv[2]))
     elif cmd == "stats":

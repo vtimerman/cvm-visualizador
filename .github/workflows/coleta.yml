@@ -57,9 +57,14 @@ jobs:
             fi
           else
             python scraper.py atualizar
-            python scraper_pas.py atualizar
             python scraper.py stats
-            python scraper_pas.py stats
+            # Processos Sancionadores: 1x/dia (por volta das 09h UTC), nao a cada 30min.
+            # (a re-varredura de ids vazios roda localmente, semanal - e' pesada)
+            hora=$(date -u +%H)
+            if [ "$hora" = "09" ]; then
+              python scraper_pas.py atualizar
+              python scraper_pas.py stats
+            fi
           fi
 
       - name: Avisar falha no WhatsApp
