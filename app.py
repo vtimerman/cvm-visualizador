@@ -1498,42 +1498,26 @@ def pessoa_de_nome(nome_oficial):
 
 @st.cache_data(ttl=300)
 def calcular_inconsistencias():
-    """Compara 'processos a julgar' (oficial) com o que temos, comparando por PESSOA
-    (agrega, p.ex., Otto Lobo aparecendo como PTE e como DOL)."""
+    """A planilha 'A Julgar' serve só para (a) achar processos que NÃO conhecemos
+    (ausentes da nossa base de Sancionadores) e (b) conflitos objetivos com outras
+    fontes oficiais (TC aceito / já julgado). Divergência de relator planilha ×
+    informativo é IRRELEVANTE e não entra aqui."""
     jul, _ = carregar_julgar()
-    res = {"divergente": [], "sem_relator": [], "tc_aceito": [], "ja_julgado": [],
-           "relator_fora": []}
+    res = {"ausente_base": [], "tc_aceito": [], "ja_julgado": []}
     if jul is None or len(jul) == 0:
         return res
-    mrel = mapa_relator_atual()
     mtc = mapa_tc()
     julg = carregar_julgados()
     set_julg = set(julg["proc_norm"]) - {""} if julg is not None else set()
-    validos = relatores_validos()
-    fonte_of = (carregar_julgar()[1] or {}).get("fonte", "planilha oficial")
+    proc_pas, _ = carregar_pas()
+    base_pn = ({_norm_proc(n) for n in proc_pas["numero"]} - {""}
+               if proc_pas is not None else set())
     for _, r in jul.iterrows():
         pn = r["proc_norm"]
-        # relator oficial precisa ser membro do Colegiado, Diretor Substituto ou SGE
-        if validos and not relator_valido(r["relator_nome"]):
-            res["relator_fora"].append({
+        if pn and base_pn and pn not in base_pn:
+            res["ausente_base"].append({
                 "processo": r["processo"], "relator": r["relator_nome"],
-                "fonte": fonte_of})
-        ofic_nome = pessoa_de_nome(r["relator_nome"])
-        info = mrel.get(pn) if pn else None
-        ded_sigla = info[0] if info else ""
-        ded_data = info[1] if info else ""
-        ded_inf = info[4] if info else ""
-        ded_nome = pessoa_de_sigla(ded_sigla, ded_data)
-        if ded_sigla and _slug(ofic_nome) != _slug(ded_nome):
-            res["divergente"].append({
-                "processo": r["processo"], "oficial": ofic_nome,
-                "fonte_oficial": fonte_of, "deduzido": ded_nome,
-                "sigla": ded_sigla,
-                "fonte_deduzido": f"Informativo nº {ded_inf} ({ded_data})"})
-        elif pn and not ded_sigla:
-            res["sem_relator"].append({
-                "processo": r["processo"], "relator": r["relator_nome"],
-                "tipo": r["tipo"], "inicio": r["dt_inicio"], "fonte": fonte_of})
+                "tipo": r["tipo"]})
         if pn and "Aceito" in mtc.get(pn, ""):
             res["tc_aceito"].append({
                 "processo": r["processo"], "relator": r["relator_nome"]})
@@ -1590,107 +1574,37 @@ def render_painel():
         st.info("A base 'Processos a Julgar' ainda não está disponível.")
     else:
         inc = calcular_inconsistencias()
-        d, s, t = inc["divergente"], inc["sem_relator"], inc["tc_aceito"]
-        jj, rf = inc["ja_julgado"], inc["relator_fora"]
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("🔀 Relator divergente", len(d),
-                  help="Relator oficial (a julgar) ≠ relator deduzido dos informativos (por pessoa).")
-        m2.metric("❓ Sem relator deduzido", len(s),
-                  help="Processo a julgar sem relator identificado nos informativos.")
-        m3.metric("✅ TC aceito mas a julgar", len(t),
+        ab, t, jj = inc["ausente_base"], inc["tc_aceito"], inc["ja_julgado"]
+        st.caption("A planilha oficial **A Julgar** é usada só para achar processos que "
+                   "**não conhecemos** e conflitos objetivos com outras fontes. "
+                   "Divergência de relator planilha × informativo é irrelevante e foi removida.")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🔍 A julgar fora da nossa base", len(ab),
+                  help="Processo na planilha A Julgar que NÃO está na nossa base de "
+                       "Sancionadores — pode ser um processo que ainda não conhecemos.")
+        m2.metric("✅ TC aceito mas a julgar", len(t),
                   help="Processo com Termo de Compromisso aceito ainda listado a julgar.")
-        m4.metric("♻️ Já julgado mas a julgar", len(jj),
-                  help="Processo que consta na lista oficial de julgados E na de a julgar.")
-        m5.metric("🚫 Relator fora do Colegiado", len(rf),
-                  help="Relator oficial que não é do Colegiado, nem Diretor Substituto, nem SGE.")
-        st.caption("ℹ️ **De onde vêm as informações:** o *relator oficial* vem da planilha "
-                   f"**Processos a Julgar** da CVM (`{jmeta.get('fonte', '')}`); o *relator "
-                   "deduzido* vem dos **Informativos do Colegiado** (sorteios/redistribuições, "
-                   "com o nº e a data do informativo); *julgados* vem da planilha **Processos "
-                   "Julgados**; *TC* vem dos **portais de Termos de Compromisso**; o *Colegiado* "
-                   "vem do **Quem é Quem**.")
-        if rf:
-            st.markdown("**🚫 Relator que não é do Colegiado/Substituto/SGE:**")
-            st.dataframe(pd.DataFrame(rf).rename(columns={
-                "processo": "Processo", "relator": "Relator oficial",
-                "fonte": "Fonte (oficial)"}),
-                use_container_width=True, hide_index=True)
-        if jj:
-            st.markdown("**♻️ Consta como já julgado e ainda listado a julgar** "
-                        "(cruzamento entre as planilhas Julgados × A Julgar):")
-            st.dataframe(pd.DataFrame(jj).rename(columns={
-                "processo": "Processo", "relator": "Relator oficial"}),
-                use_container_width=True, hide_index=True)
-        if d:
-            st.markdown("**🔀 Relator divergente** — o relator oficial (planilha A Julgar) "
-                        "diverge do deduzido (Informativos). Comparação por pessoa (Otto como "
-                        "PTE e como DOL é a mesma pessoa). As colunas mostram a **fonte de cada "
-                        "lado**:")
-            st.dataframe(pd.DataFrame(d).rename(columns={
-                "processo": "Processo", "oficial": "Relator oficial",
-                "fonte_oficial": "Fonte (oficial)", "deduzido": "Deduzido (nome)",
-                "sigla": "Deduz. (sigla)", "fonte_deduzido": "Fonte (deduzido)"}),
+        m3.metric("♻️ Já julgado mas a julgar", len(jj),
+                  help="Processo que consta na lista oficial de Julgados E na de A Julgar.")
+        if ab:
+            st.markdown("**🔍 Processos na planilha 'A Julgar' que NÃO estão na nossa "
+                        "base de Sancionadores** (investigar — talvez não conheçamos):")
+            tabela(pd.DataFrame(ab).rename(columns={
+                "processo": "Processo", "relator": "Relator (planilha)", "tipo": "Tipo"}),
                 use_container_width=True, hide_index=True)
         if t:
             st.markdown("**✅ TC aceito mas ainda listado a julgar:**")
-            st.dataframe(pd.DataFrame(t).rename(columns={
-                "processo": "Processo", "relator": "Relator oficial"}),
+            tabela(pd.DataFrame(t).rename(columns={
+                "processo": "Processo", "relator": "Relator (planilha)"}),
                 use_container_width=True, hide_index=True)
-        if s:
-            with st.expander(f"❓ {len(s)} processos a julgar sem relator deduzido nos informativos"):
-                tabela(pd.DataFrame(s).rename(columns={
-                    "processo": "Processo", "relator": "Relator oficial",
-                    "tipo": "Tipo", "inicio": "Início"}), datas=["Início"],
-                    use_container_width=True, hide_index=True)
-        if not (d or s or t or jj or rf):
+        if jj:
+            st.markdown("**♻️ Consta como já julgado e ainda listado a julgar** "
+                        "(cruzamento Julgados × A Julgar):")
+            tabela(pd.DataFrame(jj).rename(columns={
+                "processo": "Processo", "relator": "Relator (planilha)"}),
+                use_container_width=True, hide_index=True)
+        if not (ab or t or jj):
             st.success("Nenhuma inconsistência detectada. 🎉")
-
-    st.divider()
-    st.markdown("#### ⚖️ Processos a julgar — acompanhamento por relator")
-    if jul is not None and len(jul):
-        st.caption(f"{jmeta.get('titulo', '')} · fonte: {jmeta.get('fonte', '')}. "
-                   "**Designado em** = início com o relator atual (planilha). **Tempo** = "
-                   "desde a designação. **Trocas de relator** = redistribuições registradas "
-                   "nos Informativos.")
-        mrel = mapa_relator_atual()
-
-        def _ded(r):
-            info = mrel.get(r["proc_norm"])
-            if not info:
-                return "—"
-            nome = pessoa_de_sigla(info[0], info[1])
-            return f"{nome} ({info[0]})"
-
-        def _trocas(r):
-            info = mrel.get(r["proc_norm"])
-            return info[5] if info else 0
-        v = jul.copy()
-        v["Designado em"] = v["dt_inicio"]
-        v["Tempo decorrido"] = v["dt_inicio"].apply(_dias_desde)
-        v["Trocas de relator"] = v.apply(_trocas, axis=1)
-        v["Deduzido (informativos)"] = v.apply(_ded, axis=1)
-        show = v[["relator_nome", "processo", "tipo", "Designado em",
-                  "Tempo decorrido", "Trocas de relator",
-                  "Deduzido (informativos)"]].rename(columns={
-            "relator_nome": "Relator oficial", "processo": "Processo", "tipo": "Tipo"})
-        tabela(show, datas=["Designado em"], dias=["Tempo decorrido"],
-               use_container_width=True, hide_index=True, height=380)
-        st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="processos_a_julgar.csv", mime="text/csv")
-        # historico de relatoria por processo (expander)
-        with st.expander("🕓 Ver histórico de relatoria de um processo"):
-            procs = list(v["processo"])
-            escolha = st.selectbox("Processo", procs, key="jul_hist_proc")
-            pn = _norm_proc(escolha)
-            hist = historico_relator(pn)
-            if hist:
-                dfh = pd.DataFrame(
-                    [{"Data": d, "Relator": f"{pessoa_de_sigla(rel, d)} ({rel})",
-                      "Evento": ev2, "Informativo": f"nº {inf}"}
-                     for d, rel, ev2, inf in hist])
-                tabela(dfh, datas=["Data"], use_container_width=True, hide_index=True)
-            else:
-                st.info("Sem histórico de relatoria nos informativos para este processo.")
 
 
 @st.cache_data(ttl=300)
