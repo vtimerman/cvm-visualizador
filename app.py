@@ -332,6 +332,22 @@ def dialog_processo(row, acus):
     else:
         desp_html = ('<h3>Despachos/audiências relacionados</h3>'
                      '<p style="font-size:13px">— nenhum despacho relacionado —</p>')
+    # Decisões do Colegiado (cruzamento por nº do processo)
+    decs = decisoes_do_processo(_norm_proc(row["numero"]))
+    if decs:
+        dcr = "".join(
+            f'<tr><td style="white-space:nowrap">{e(data)}</td><td>{e(tipo)}</td>'
+            f'<td>{e(ementa)}</td>'
+            f'<td><a href="{e(link)}" target="_blank">abrir ↗</a></td></tr>'
+            for data, tipo, ementa, link in decs[:40])
+        dec_html = (
+            f'<h3>Decisões do Colegiado ({len(decs)})</h3>'
+            '<table><tr class="header"><td>Data</td><td>Tipo</td>'
+            f'<td>Ementa</td><td>Link</td></tr>{dcr}</table>')
+    else:
+        dec_html = ('<h3>Decisões do Colegiado</h3>'
+                    '<p style="font-size:13px">— nenhuma decisão do Colegiado '
+                    'relacionada (a base ainda cresce) —</p>')
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
@@ -341,8 +357,9 @@ def dialog_processo(row, acus):
         f'<h3>Acusados ({len(ac)})</h3>'
         '<table><tr class="header"><td>Nome/Razão social</td><td>Situação</td>'
         f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
-        f'{rel_html}{tc_html}{desp_html}</div></body></html>')
+        f'{rel_html}{tc_html}{dec_html}{desp_html}</div></body></html>')
     components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
+                    + len(decs[:40]) * 30
                     + len(desp[:40]) * 34, scrolling=True)
 
 
@@ -945,6 +962,11 @@ def dialog_termo(row):
                 st.markdown(f"*{assunto}*")
             if str(decisao).strip():
                 st.info(decisao)
+    decs = decisoes_do_processo(pn)
+    if decs:
+        st.markdown(f"#### 📜 Decisões do Colegiado ({len(decs)})")
+        for data, tipo, ementa, link in decs[:15]:
+            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link})")
     desp = despachos_do_processo(row["processo"])
     if desp:
         st.markdown(f"#### 🏛️ Despachos/audiências relacionados ({len(desp)})")
@@ -1165,6 +1187,13 @@ def dialog_ns(chave, processo):
         meta.append("**Área/relator:** " + " · ".join(areas))
     meta.append(f"**Decisões registradas:** {len(g)}")
     st.markdown("  \n".join(meta))
+    # Decisões do Colegiado (cruzamento por nº do processo)
+    pn = _norm_proc(processo)
+    decs = decisoes_do_processo(pn)
+    if decs:
+        st.markdown(f"#### 📜 Decisões do Colegiado ({len(decs)})")
+        for data, tipo, ementa, link in decs[:15]:
+            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link})")
     # links de TODAS as decisões, num bloco
     links = [(r["data"], r["inf_numero"], r["link"]) for _, r in g.iterrows() if r["link"]]
     if links:
@@ -1656,6 +1685,21 @@ def carregar_atas_colegiado():
         df = None
     con.close()
     return df
+
+
+def decisoes_do_processo(pn):
+    """Decisões do Colegiado (data, tipo, ementa, link) de um processo."""
+    if not pn or not os.path.exists(DECISOES_DB_PATH):
+        return []
+    con = sqlite3.connect(DECISOES_DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT data,tipo,ementa,link FROM decisoes WHERE proc_norm=? "
+            "ORDER BY data_iso DESC", (pn,)).fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    return rows
 
 
 @st.dialog("Decisão do Colegiado", width="large")
