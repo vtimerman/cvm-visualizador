@@ -932,6 +932,23 @@ def agregar_nao_sancionadores():
     return pd.DataFrame(linhas)
 
 
+RE_PENDENTE = re.compile(
+    r"suspens|pedido de vista|\bvista\b|dilig[êe]ncia|retomad|adiad|sobrestad|"
+    r"retorno d[oa]|retorno ao|convertido em dilig|reabertura|aguard|"
+    r"sess[ãa]o.*suspens|n[ãa]o concluíd", re.I)
+
+
+def _decisao_pendente(g):
+    """Heurística: a última decisão indica que o assunto ainda não se encerrou."""
+    if len(g) == 0:
+        return False, ""
+    ult = g.iloc[-1]
+    txt = f"{ult['decisao']} {ult['resumo']}"
+    if RE_PENDENTE.search(txt):
+        return True, f"Última decisão ({ult['data']}, Inf. nº {ult['inf_numero']})"
+    return False, ""
+
+
 @st.dialog("Processo não-sancionador", width="large")
 def dialog_ns(chave, processo):
     df = carregar_informativos()
@@ -940,6 +957,20 @@ def dialog_ns(chave, processo):
         lambda r: r["proc_norm"] if r["proc_norm"] else f"__id{r['id']}", axis=1)
     g = g[g["chave"] == chave].sort_values(["data_iso", "item"])
     st.markdown(f"### Processo {processo}")
+    # resumo do que se trata (assunto/resumo mais recente)
+    ult = g.iloc[-1] if len(g) else None
+    sobre = ""
+    if ult is not None:
+        sobre = str(ult["resumo"]).strip() or str(ult["assunto"]).strip()
+    if sobre:
+        st.markdown(f"**Sobre:** {sobre}")
+    # aviso de decisão pendente
+    pendente, quando = _decisao_pendente(g)
+    if pendente:
+        st.warning(f"⏳ **Possível decisão pendente** — {quando} indica que o assunto "
+                   "ainda não se encerrou (vista/diligência/suspensão/retorno).")
+    else:
+        st.success("✅ Sem pendência aparente na última decisão registrada.")
     tipos = sorted({t for t in g["tipo"] if t})
     areas = sorted({a for a in g["relator"] if a})
     meta = []
@@ -949,6 +980,11 @@ def dialog_ns(chave, processo):
         meta.append("**Área/relator:** " + " · ".join(areas))
     meta.append(f"**Decisões registradas:** {len(g)}")
     st.markdown("  \n".join(meta))
+    # links de TODAS as decisões, num bloco
+    links = [(r["data"], r["inf_numero"], r["link"]) for _, r in g.iterrows() if r["link"]]
+    if links:
+        st.markdown("**🔗 Links de todas as decisões:** " + " · ".join(
+            f"[{d} (Inf. {inf})]({lk})" for d, inf, lk in links))
     st.markdown("#### 🗂️ Linha do tempo das decisões")
     for _, r in g.iterrows():
         titulo = f"**{r['data']}** — Informativo nº {r['inf_numero']}, item {r['item']} · {r['tipo']}"
