@@ -346,6 +346,108 @@ def dialog_processo(row, acus):
 
 
 def render_processos():
+    aba1, aba2 = st.tabs(["⚖️ Processos", "📊 Prazos por relator"])
+    with aba1:
+        render_processos_lista()
+    with aba2:
+        render_prazos()
+
+
+def _to_date(s):
+    m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(s or ""))
+    return dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
+
+
+@st.cache_data(ttl=300)
+def estatisticas_prazos():
+    """Por relator (pessoa): estoque a julgar (idade) e julgados (tempo até julgar)."""
+    jul, _ = carregar_julgar()
+    julg = carregar_julgados()
+    rel_df = carregar_relatores()
+    hoje = dt.date.today()
+    eventos = {}
+    if rel_df is not None:
+        for _, r in rel_df.sort_values("data_iso").iterrows():
+            d = _to_date(r["data"])
+            if d:
+                eventos.setdefault(r["proc_norm"], []).append(d)
+    estoque = []
+    if jul is not None:
+        for _, r in jul.iterrows():
+            d0 = _to_date(r["dt_inicio"])
+            estoque.append({
+                "Relator": pessoa_de_nome(r["relator_nome"]), "Processo": r["processo"],
+                "Tipo": r.get("tipo", ""), "Designado em": r["dt_inicio"],
+                "Parado há (dias)": (hoje - d0).days if d0 else None})
+    julgados = []
+    if julg is not None:
+        for _, r in julg.iterrows():
+            dj = _to_date(r["data_julg"])
+            evs = [d for d in eventos.get(r["proc_norm"], []) if not dj or d <= dj]
+            drel = max(evs) if evs else (min(eventos.get(r["proc_norm"], []))
+                                         if eventos.get(r["proc_norm"]) else None)
+            julgados.append({
+                "Relator": pessoa_de_nome(r["relator_nome"]), "Processo": r["processo"],
+                "Recebeu relatoria": drel.strftime("%d/%m/%Y") if drel else "—",
+                "Julgado em": r["data_julg"],
+                "Tempo até julgar (dias)": (dj - drel).days if (dj and drel) else None})
+    return pd.DataFrame(estoque), pd.DataFrame(julgados)
+
+
+def render_prazos():
+    est, jug = estatisticas_prazos()
+    if (est is None or len(est) == 0) and (jug is None or len(jug) == 0):
+        st.info("⏳ Sem dados de 'a julgar' / 'julgados' para as estatísticas ainda.")
+        return
+    st.caption("Priorização e prazos por relator, cruzando a planilha oficial "
+               "'A Julgar' (estoque), 'Julgados' e as distribuições dos Informativos.")
+    # visão geral por relator
+    linhas = []
+    relatores = sorted(set(list(est["Relator"]) + list(jug["Relator"])) - {""})
+    for rel in relatores:
+        e = est[est["Relator"] == rel]
+        j = jug[jug["Relator"] == rel]
+        idade = e["Parado há (dias)"].dropna()
+        tj = j["Tempo até julgar (dias)"].dropna()
+        linhas.append({
+            "Relator": rel, "Em estoque": len(e),
+            "Mais antigo parado (dias)": int(idade.max()) if len(idade) else 0,
+            "Estoque médio (dias)": int(idade.mean()) if len(idade) else 0,
+            "Julgados": len(j),
+            "Tempo médio até julgar (dias)": int(tj.mean()) if len(tj) else 0})
+    resumo = pd.DataFrame(linhas)
+    st.markdown("#### 📊 Visão geral por relator")
+    st.dataframe(resumo, use_container_width=True, hide_index=True)
+    if len(resumo):
+        st.markdown("**Estoque (processos a julgar) por relator:**")
+        st.bar_chart(resumo.set_index("Relator")["Em estoque"])
+
+    st.divider()
+    st.markdown("#### 🔎 Detalhe por relator")
+    sel = st.selectbox("Relator", relatores, key="prz_rel")
+    e = est[est["Relator"] == sel].sort_values("Parado há (dias)", ascending=False)
+    j = jug[jug["Relator"] == sel].sort_values("Julgado em", ascending=False)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Em estoque (a julgar)", len(e))
+    c2.metric("Mais antigo parado",
+              f"{int(e['Parado há (dias)'].max())} dias" if len(e.dropna()) else "—")
+    c3.metric("Tempo médio até julgar",
+              f"{int(j['Tempo até julgar (dias)'].dropna().mean())} dias"
+              if len(j['Tempo até julgar (dias)'].dropna()) else "—")
+    st.markdown("**📥 Estoque — o que está parado há mais tempo (topo = mais antigo):**")
+    if len(e):
+        st.dataframe(e.drop(columns=["Relator"]), use_container_width=True, hide_index=True)
+        st.bar_chart(e.set_index("Processo")["Parado há (dias)"].head(20))
+    else:
+        st.info("Sem processos em estoque para este relator na planilha atual.")
+    st.markdown("**✅ Julgados — quando recebeu a relatoria × quando julgou:**")
+    if len(j):
+        st.dataframe(j.drop(columns=["Relator"]), use_container_width=True, hide_index=True)
+    else:
+        st.info("Sem julgados atribuídos a este relator na planilha de julgados.")
+
+
+def render_processos_lista():
     proc, acus = carregar_pas()
     if proc is None or len(proc) == 0:
         st.info("⏳ A base de Processos Sancionadores ainda está sendo coletada. "
