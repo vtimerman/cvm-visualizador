@@ -124,8 +124,29 @@ def pendentes():
     con.close()
 
 
+def aplicar_ia(json_path):
+    """Aplica a parametrizacao de IA a partir de um JSON:
+    { "arquivo": {"resumo": "...", "deliberacoes": "...", "palavras_chave": "..."} }
+    e marca ai_feito=1 para cada ata atualizada."""
+    import json
+    dados = json.load(open(json_path, encoding="utf-8"))
+    con = conectar()
+    n = 0
+    for arq, campos in dados.items():
+        con.execute("""UPDATE atas SET resumo=?, deliberacoes=?, palavras_chave=?,
+                       ai_feito=1 WHERE arquivo=?""",
+                    (campos.get("resumo", ""), campos.get("deliberacoes", ""),
+                     campos.get("palavras_chave", ""), arq))
+        n += con.total_changes and 1 or 0
+    con.commit()
+    con.close()
+    print(f"[atas_seed] IA aplicada a {len(dados)} ata(s).")
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "pendentes":
         pendentes()
+    elif len(sys.argv) > 2 and sys.argv[1] == "aplicar_ia":
+        aplicar_ia(sys.argv[2])
     else:
         construir()
