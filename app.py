@@ -1757,6 +1757,19 @@ def _mapa_abertura():
     return out
 
 
+@st.cache_data(ttl=300)
+def _mapa_link_pas():
+    """proc_norm -> URL da página do processo sancionador no site da CVM."""
+    proc, _ = carregar_pas()
+    out = {}
+    if proc is not None:
+        for _, r in proc.iterrows():
+            pn = _norm_proc(r["numero"])
+            if pn:
+                out[pn] = URL_PAS + str(r["idproc"])
+    return out
+
+
 def _siglas_da_pessoa(nome_pessoa):
     """Todas as siglas que resolvem para a mesma pessoa (ex.: Otto = DOL e PTE)."""
     alvo = _slug(nome_pessoa)
@@ -1774,6 +1787,7 @@ def processos_do_relator(nome_pessoa):
     """Processos em que a pessoa é o relator ATUAL (deduzido dos informativos)."""
     mrel = mapa_relator_atual()
     aber = _mapa_abertura()
+    links = _mapa_link_pas()
     df = carregar_relatores()
     proc_disp = {}
     if df is not None:
@@ -1793,7 +1807,8 @@ def processos_do_relator(nome_pessoa):
             "Processo": proc_disp.get(pn, pn), "Sigla": info[0],
             "Relator desde": info[1], "Relator há (dias)": _dias_desde(info[1]),
             "Abertura do processo": abertura or (f"(ano {ano})" if ano else "—"),
-            "Aberto há (dias)": _dias_desde(abertura), "Trocas": info[5], "_pn": pn})
+            "Aberto há (dias)": _dias_desde(abertura), "Trocas": info[5],
+            "Sancionador": links.get(pn, ""), "_pn": pn})
     return sorted(out, key=lambda x: (x["Relator há (dias)"] is None,
                                       -(x["Relator há (dias)"] or 0)))
 
@@ -1849,34 +1864,14 @@ def dialog_relator(nome, cargo, sigla):
     st.markdown("#### ⚖️ Processos sob relatoria")
     st.caption("*Relator desde* = última vez sorteado/redistribuído relator. *Abertura* "
                "= do processo sancionador. Colunas de tempo em **dias**. "
-               "👆 **Clique numa linha para ver do que o processo se trata.**")
+               "👆 **Clique em 'abrir ↗' para ir direto à página do processo no site da CVM.**")
     if procs:
-        dfp = pd.DataFrame(procs)
-        evp = tabela(dfp.drop(columns=["_pn"]), datas=["Relator desde"],
-                     dias=["Relator há (dias)", "Aberto há (dias)"],
-                     use_container_width=True, hide_index=True, key="dlg_procs_sel",
-                     on_select="rerun", selection_mode="single-row")
-        selp = evp.selection.rows if getattr(evp, "selection", None) else []
-        if selp and selp[0] < len(dfp):
-            row = dfp.iloc[selp[0]]
-            objeto, delibs = sobre_processo(row["_pn"])
-            st.markdown(f"##### 📄 Processo {row['Processo']} — do que se trata")
-            if objeto:
-                st.markdown(f"**Objeto:** {objeto}")
-            if delibs:
-                st.caption(f"{len(delibs)} deliberação(ões) nos Informativos:")
-                for data, inf, tipo, assunto, resumo, decisao, link in delibs:
-                    st.markdown(f"**{data}** · Inf. nº {inf} · {tipo}")
-                    if str(resumo).strip():
-                        st.markdown(f"**Resumo (IA):** {resumo}")
-                    elif str(assunto).strip():
-                        st.markdown(f"*{assunto}*")
-                    if str(decisao).strip():
-                        st.info(decisao)
-                    if link:
-                        st.caption(f"[Abrir PDF do informativo ↗]({link})")
-            if not objeto and not delibs:
-                st.info("Sem descrição adicional para este processo nas bases atuais.")
+        dfp = pd.DataFrame(procs).drop(columns=["_pn"])
+        tabela(dfp, datas=["Relator desde"],
+               dias=["Relator há (dias)", "Aberto há (dias)"],
+               use_container_width=True, hide_index=True,
+               column_config={"Sancionador": st.column_config.LinkColumn(
+                   "Página do processo", display_text="abrir ↗")})
     else:
         st.info("Nenhum processo com esta pessoa como relator atual nos informativos.")
     st.markdown("#### 🚫 Impedimentos e suspeições")
