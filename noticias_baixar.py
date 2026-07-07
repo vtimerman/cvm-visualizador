@@ -7,9 +7,14 @@ Fonte: https://www.gov.br/cvm/pt-br/assuntos/noticias (paginação Plone b_start
 Cada notícia tem: categoria (ATIVIDADE SANCIONADORA, ALERTA AO MERCADO, ...),
 título, link, data, resumo (lead) e tags. Guarda tudo em noticias.db.
 
+O corpo completo de cada notícia (onde aparecem os números de processo e os nomes
+dos envolvidos) é baixado à parte, da própria página da notícia (div
+`parent-fieldname-text` do Plone), e guardado na coluna `corpo`.
+
 Uso:
-  python noticias_baixar.py              # incremental (poucas páginas; para a rotina de 1h)
+  python noticias_baixar.py              # incremental (poucas páginas + corpo dos novos)
   python noticias_baixar.py backfill     # varre TODAS as páginas (popular a base)
+  python noticias_baixar.py corpos       # baixa o corpo das notícias que ainda não têm
 """
 import os
 import re
@@ -18,6 +23,7 @@ import html
 import time
 import sqlite3
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -48,8 +54,77 @@ def conectar():
     con.execute("""CREATE TABLE IF NOT EXISTS noticias(
         url TEXT PRIMARY KEY, categoria TEXT, titulo TEXT, data TEXT, data_iso TEXT,
         resumo TEXT, tags TEXT, coletado_em TEXT)""")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(noticias)")}
+    if "corpo" not in cols:
+        con.execute("ALTER TABLE noticias ADD COLUMN corpo TEXT")
     con.commit()
     return con
+
+
+# marcadores que indicam o fim do texto da notícia (rodapé/boilerplate do Plone)
+_FIM_CORPO = ("viewlet-below-content", "documentActions", "<footer",
+              "Saiba mais</", "id=\"disqus", "portletNavigationTree",
+              "class=\"related")
+
+
+def extrair_corpo(t):
+    """Extrai o texto do corpo da notícia (div parent-fieldname-text do Plone)."""
+    i = t.find("parent-fieldname-text")
+    if i < 0:
+        return ""
+    j = t.find(">", i)                      # pula o resto da tag de abertura
+    seg = t[j + 1:] if j > 0 else t[i:]
+    cortes = [seg.find(s) for s in _FIM_CORPO if 0 < seg.find(s)]
+    seg = seg[:min(cortes)] if cortes else seg[:20000]
+    corpo = re.sub(r"<[^>]+>", " ", seg)
+    return re.sub(r"\s+", " ", html.unescape(corpo)).strip()[:20000]
+
+
+def baixar_corpo(url, tentativas=3):
+    for i in range(tentativas):
+        try:
+            r = requests.get(url, headers=H, timeout=60)
+            r.encoding = r.apparent_encoding or "utf-8"
+            return extrair_corpo(r.text)
+        except requests.exceptions.RequestException:
+            if i == tentativas - 1:
+                return ""
+            time.sleep(2 * (i + 1))
+
+
+# categorias cujo corpo interessa cruzar com processos (sanção/julgamento/TC).
+# As demais (agenda, evento, normatização...) não citam processos e ficam sem corpo,
+# para não inchar o banco.
+CAT_RELEVANTE = ("(categoria LIKE '%SANCION%' OR categoria LIKE '%JULG%' OR "
+                 "categoria LIKE '%TERMO DE COMPROMISSO%' OR categoria LIKE '%ALERTA%')")
+
+
+def backfill_corpos(workers=8):
+    """Preenche `corpo` das notícias relevantes que ainda não têm (varredura única)."""
+    con = conectar()
+    pend = [u for (u,) in con.execute(
+        "SELECT url FROM noticias WHERE (corpo IS NULL OR corpo='') AND "
+        + CAT_RELEVANTE)]
+    con.close()
+    print(f"[noticias] corpos a baixar: {len(pend)}")
+    feitos = vazios = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        resultados = ex.map(lambda u: (u, baixar_corpo(u)), pend)
+        con = conectar()
+        for k, (url, corpo) in enumerate(resultados, 1):
+            con.execute("UPDATE noticias SET corpo=? WHERE url=?", (corpo, url))
+            feitos += 1
+            if not corpo:
+                vazios += 1
+            if k % 100 == 0:
+                con.commit()
+                print(f"  corpos {k}/{len(pend)} | vazios {vazios}")
+        con.commit()
+        com = con.execute("SELECT COUNT(*) FROM noticias "
+                          "WHERE corpo IS NOT NULL AND corpo!=''").fetchone()[0]
+        con.close()
+    print(f"[noticias] corpos preenchidos: {feitos} ({vazios} vazios) | "
+          f"total com corpo: {com}")
 
 
 def parse_pagina(t):
@@ -92,10 +167,11 @@ def coletar(max_paginas, parar_sem_novos=True):
         for it in itens:
             if it["url"] in existentes:
                 continue
+            corpo = baixar_corpo(it["url"])   # novos ja entram com o corpo
             con.execute("""INSERT OR IGNORE INTO noticias(url,categoria,titulo,data,
-                data_iso,resumo,tags,coletado_em) VALUES(?,?,?,?,?,?,?,?)""",
+                data_iso,resumo,tags,coletado_em,corpo) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (it["url"], it["categoria"], it["titulo"], it["data"],
-                 it["data_iso"], it["resumo"], it["tags"], hoje))
+                 it["data_iso"], it["resumo"], it["tags"], hoje, corpo))
             existentes.add(it["url"])
             novos += 1
             achou_novo += 1
@@ -112,7 +188,10 @@ def coletar(max_paginas, parar_sem_novos=True):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "backfill":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "backfill":
         coletar(max_paginas=400, parar_sem_novos=False)
+    elif cmd == "corpos":
+        backfill_corpos()
     else:
         coletar(max_paginas=5, parar_sem_novos=True)
