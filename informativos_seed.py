@@ -72,6 +72,10 @@ RE_SORTEIO = re.compile(
     r"Reg\.?\s*n?[ºo°]?\s*(\d{3,4}/\d{2})\s*[-–]\s*"
     r"(1\d{4}\.\d{6}/\d{4}-\d{2}|RJ\s?\d{4}/\d{3,6}|\d{2,4}/\d{4})"
     r"\s*(?:\([^)]*\)\s*)*[-–]\s*([A-Z]{2,4})\b")
+# "Impedimento(s): DFP, DAR e DOL" / "Suspeição: PTE"
+RE_IMPED = re.compile(
+    r"(Impedimentos?|Suspei[çc][õoãa][eo]?s?)\s*:?\s*"
+    r"([A-Z][A-Za-z,;/ eE]{0,70})")
 
 
 def norm_proc(p):
@@ -113,6 +117,12 @@ def conectar():
         proc_norm TEXT, processo TEXT, reg TEXT, relator TEXT, evento TEXT,
         arquivo TEXT, inf_numero TEXT, data TEXT, data_iso TEXT,
         UNIQUE(proc_norm, arquivo, relator, evento))""")
+    # impedimentos/suspeicoes declarados por diretor em cada deliberacao
+    con.execute("""CREATE TABLE IF NOT EXISTS impedimentos(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proc_norm TEXT, processo TEXT, sigla TEXT, tipo TEXT,
+        arquivo TEXT, inf_numero TEXT, assunto TEXT, data TEXT, data_iso TEXT,
+        UNIQUE(proc_norm, sigla, tipo, arquivo))""")
     # mapa sigla <-> nome do diretor/presidente (mencoes 'Dir./Pres. Nome')
     cols_sig = [r[1] for r in con.execute("PRAGMA table_info(siglas)")]
     if cols_sig and "papel" not in cols_sig:
@@ -267,6 +277,7 @@ def construir():
     hoje = dt.date.today().isoformat()
     con.execute("DELETE FROM relatores")  # reconstroi o mapa de relatoria por completo
     con.execute("DELETE FROM siglas")
+    con.execute("DELETE FROM impedimentos")
     n_arq = n_del = n_rel = 0
     for txt in sorted(glob.glob(os.path.join(TXT_DIR, "*.txt"))):
         base = os.path.splitext(os.path.basename(txt))[0]
@@ -301,6 +312,15 @@ def construir():
                     proc_norm,processo,reg,relator,evento,arquivo,inf_numero,
                     data,data_iso) VALUES(?,?,?,?,?,?,?,?,?)""",
                     (pn, processo, reg, sigla, tipo, base, inf_num, data, data_iso))
+            # impedimentos / suspeicoes declarados por diretor nesta deliberacao
+            if pn:
+                for rot, siglas_txt in RE_IMPED.findall(corpo):
+                    kind = "Suspeição" if re.match(r"Suspei", rot, re.I) else "Impedimento"
+                    for sg in re.findall(r"\b(PTE|D[A-Z]{2,3})\b", siglas_txt):
+                        con.execute("""INSERT OR IGNORE INTO impedimentos(proc_norm,
+                            processo,sigla,tipo,arquivo,inf_numero,assunto,data,data_iso)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",
+                            (pn, processo, sg, kind, base, inf_num, assunto, data, data_iso))
             # preserva IA existente
             row = con.execute("SELECT resumo,palavras_chave,partes,resultado,ai_feito "
                               "FROM deliberacoes WHERE arquivo=? AND item=?",

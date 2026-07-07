@@ -318,13 +318,16 @@ def dialog_processo(row, acus):
         dr = "".join(
             f'<tr><td style="white-space:nowrap">{e(d["data"])}</td>'
             f'<td>{e(d["componente"])}</td><td>{e(d["solicitante"])}</td>'
-            f'<td>{e(d["assunto"])}</td></tr>' for d in desp[:40])
+            f'<td>{e(d["assunto"])}</td>'
+            f'<td><a href="{e(d["link"])}" target="_blank">abrir ↗</a></td></tr>'
+            for d in desp[:40])
         desp_html = (
             f'<h3>Despachos/audiências relacionados ({len(desp)})</h3>'
             '<p style="font-size:12px">Cruzados pelo número do processo (tolera '
-            'número parcial citado no despacho).</p>'
+            'número parcial citado no despacho). Clique em "abrir" para ver a '
+            'audiência no site da CVM.</p>'
             '<table><tr class="header"><td>Data</td><td>Componente</td>'
-            f'<td>Solicitante</td><td>Assunto</td></tr>{dr}</table>')
+            f'<td>Solicitante</td><td>Assunto</td><td>Link</td></tr>{dr}</table>')
     else:
         desp_html = ('<h3>Despachos/audiências relacionados</h3>'
                      '<p style="font-size:13px">— nenhum despacho relacionado —</p>')
@@ -1660,6 +1663,114 @@ def render_pautas():
                        file_name="pautas_julgamento.csv", mime="text/csv")
 
 
+def _tempo_desde(data_str):
+    m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(data_str or ""))
+    if not m:
+        return ""
+    d0 = dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    dias = (dt.date.today() - d0).days
+    if dias < 0:
+        return ""
+    if dias < 60:
+        return f"{dias} dias"
+    meses = dias // 30
+    return f"{meses // 12}a {meses % 12}m" if meses >= 12 else f"{meses} meses"
+
+
+@st.cache_data(ttl=300)
+def _mapa_abertura():
+    """proc_norm -> data de abertura (dos Processos Sancionadores), quando houver."""
+    proc, _ = carregar_pas()
+    out = {}
+    if proc is not None:
+        for _, r in proc.iterrows():
+            pn = _norm_proc(r["numero"])
+            if pn and str(r["data_abertura"]).strip():
+                out[pn] = r["data_abertura"]
+    return out
+
+
+def _siglas_da_pessoa(nome_pessoa):
+    """Todas as siglas que resolvem para a mesma pessoa (ex.: Otto = DOL e PTE)."""
+    alvo = _slug(nome_pessoa)
+    out = set()
+    for sg, nome in mapa_diretores().items():
+        if _slug(nome) == alvo:
+            out.add(sg)
+    # PTE se a pessoa é o presidente atual
+    if _slug(presidente_em(dt.date.today().isoformat())) == alvo:
+        out.add("PTE")
+    return out
+
+
+def processos_do_relator(nome_pessoa):
+    """Processos em que a pessoa é o relator ATUAL (deduzido dos informativos)."""
+    mrel = mapa_relator_atual()
+    aber = _mapa_abertura()
+    df = carregar_relatores()
+    proc_disp = {}
+    if df is not None:
+        for _, r in df.iterrows():
+            proc_disp.setdefault(r["proc_norm"], r["processo"])
+    alvo = _slug(nome_pessoa)
+    out = []
+    for pn, info in mrel.items():
+        if _slug(pessoa_de_sigla(info[0], info[1])) != alvo:
+            continue
+        ano = ""
+        m = re.search(r"/(\d{4})-\d{2}$", pn) or re.search(r"RJ(\d{4})", pn)
+        if m:
+            ano = m.group(1)
+        abertura = aber.get(pn, "")
+        out.append({
+            "Processo": proc_disp.get(pn, pn), "Sigla": info[0],
+            "Relator desde": info[1], "Tempo como relator": _tempo_desde(info[1]),
+            "Abertura do processo": abertura or (f"(ano {ano})" if ano else "—"),
+            "Tempo desde a abertura": _tempo_desde(abertura), "Trocas": info[5]})
+    return sorted(out, key=lambda x: x["Relator desde"], reverse=True)
+
+
+def impedimentos_da_pessoa(nome_pessoa):
+    """Impedimentos/suspeições declarados pela pessoa (todas as suas siglas)."""
+    siglas = _siglas_da_pessoa(nome_pessoa)
+    if not siglas or not os.path.exists(INF_DB_PATH):
+        return []
+    con = sqlite3.connect(INF_DB_PATH)
+    q = ("SELECT processo,tipo,assunto,inf_numero,data FROM impedimentos "
+         f"WHERE sigla IN ({','.join('?' * len(siglas))}) ORDER BY data_iso DESC")
+    try:
+        rows = con.execute(q, tuple(siglas)).fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    return rows
+
+
+@st.dialog("Relator — processos e impedimentos", width="large")
+def dialog_relator(nome, cargo, sigla):
+    st.markdown(f"### {nome}")
+    st.caption(f"{cargo} · {sigla}")
+    procs = processos_do_relator(nome)
+    imped = impedimentos_da_pessoa(nome)
+    c1, c2 = st.columns(2)
+    c1.metric("Processos como relator atual", len(procs))
+    c2.metric("Impedimentos / suspeições declarados", len(imped))
+    st.markdown("#### ⚖️ Processos sob relatoria")
+    st.caption("*Relator desde* = última vez sorteado/redistribuído relator do "
+               "processo. *Abertura* = do processo sancionador (ou o ano do número).")
+    if procs:
+        st.dataframe(pd.DataFrame(procs), use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum processo com esta pessoa como relator atual nos informativos.")
+    st.markdown("#### 🚫 Impedimentos e suspeições")
+    if imped:
+        dfi = pd.DataFrame(imped, columns=["Processo", "Tipo", "Assunto",
+                                           "Informativo", "Data"])
+        st.dataframe(dfi, use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum impedimento/suspeição registrado nos informativos.")
+
+
 def render_quem():
     st.subheader("👥 Quem é Quem — CVM")
     df = carregar_quem()
@@ -1702,19 +1813,31 @@ def render_quem():
     res["relatoria"] = res.apply(
         lambda r: cont_rel.get(_slug(pessoa_de_sigla(r["sigla"])), 0)
         if r["e_relator"] == 1 else None, axis=1)
+    res["impedimentos"] = res.apply(
+        lambda r: len(impedimentos_da_pessoa(r["nome"])) if r["e_relator"] == 1 else None,
+        axis=1)
     res = res.sort_values(["e_relator", "cargo"], ascending=[False, True])
     st.metric("Pessoas encontradas", len(res))
     if nrel:
         st.markdown("**⚖️ Colegiado atual** (quem pode ser relator):")
-        st.caption("*Processos a julgar* = da planilha oficial 'A Julgar' (snapshot). "
-                   "*Relator de* = processos em que a pessoa é o relator atual, deduzido "
-                   "dos Informativos (cobre quem não está na planilha, como novos diretores).")
-        board = res[res["e_relator"] == 1][
-            ["nome", "cargo", "sigla", "email", "a_julgar", "relatoria"]]
-        st.dataframe(board.rename(columns={
+        st.caption("*Processos a julgar* = planilha oficial 'A Julgar' (snapshot). "
+                   "*Relator de* = processos em que é o relator atual, deduzido dos "
+                   "Informativos. *Impedimentos* = vezes que se declarou impedido/suspeito. "
+                   "👆 Clique numa linha para abrir a ficha do relator.")
+        board = res[res["e_relator"] == 1].reset_index(drop=True)
+        show_b = board[["nome", "cargo", "sigla", "email", "a_julgar", "relatoria",
+                        "impedimentos"]].rename(columns={
             "nome": "Nome", "cargo": "Cargo", "sigla": "Sigla", "email": "E-mail",
-            "a_julgar": "Processos a julgar", "relatoria": "Relator de (informativos)"}),
-            use_container_width=True, hide_index=True)
+            "a_julgar": "A julgar", "relatoria": "Relator de",
+            "impedimentos": "Impedimentos"})
+        evb = st.dataframe(show_b, use_container_width=True, hide_index=True,
+                           on_select="rerun", selection_mode="single-row")
+        selb = evb.selection.rows if getattr(evb, "selection", None) else []
+        if selb:
+            r = board.iloc[selb[0]]
+            if r["nome"] != st.session_state.get("dlg_rel"):
+                st.session_state["dlg_rel"] = r["nome"]
+                dialog_relator(r["nome"], r["cargo"], r["sigla"])
     cols = ["nome", "cargo", "sigla", "email", "telefone", "perfil"]
     show = res[cols].rename(columns={
         "nome": "Nome", "cargo": "Cargo", "sigla": "Sigla", "email": "E-mail",
