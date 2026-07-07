@@ -14,7 +14,7 @@ dos envolvidos) é baixado à parte, da própria página da notícia (div
 Uso:
   python noticias_baixar.py              # incremental (poucas páginas + corpo dos novos)
   python noticias_baixar.py backfill     # varre TODAS as páginas (popular a base)
-  python noticias_baixar.py corpos       # baixa o corpo das notícias que ainda não têm
+  python noticias_baixar.py corpos       # baixa o corpo das notícias dos últimos ~2 anos
 """
 import os
 import re
@@ -92,20 +92,30 @@ def baixar_corpo(url, tentativas=3):
             time.sleep(2 * (i + 1))
 
 
-# categorias cujo corpo interessa cruzar com processos (sanção/julgamento/TC).
-# As demais (agenda, evento, normatização...) não citam processos e ficam sem corpo,
-# para não inchar o banco.
-CAT_RELEVANTE = ("(categoria LIKE '%SANCION%' OR categoria LIKE '%JULG%' OR "
-                 "categoria LIKE '%TERMO DE COMPROMISSO%' OR categoria LIKE '%ALERTA%')")
+# Só interessa cruzar o corpo das notícias dos últimos anos (as antigas são
+# ruído: agenda, eventos, editais vencidos...). A janela pega TODAS as categorias
+# (inclusive grupos de trabalho, avisos etc.), não só sanção/julgamento.
+JANELA_DIAS = 730   # ~2 anos
+
+
+def _corte_iso():
+    return (dt.date.today() - dt.timedelta(days=JANELA_DIAS)).isoformat()
 
 
 def backfill_corpos(workers=8):
-    """Preenche `corpo` das notícias relevantes que ainda não têm (varredura única)."""
+    """Baixa o corpo das notícias dos últimos ~2 anos (todas as categorias) e
+    apaga o corpo das mais antigas, para manter o banco enxuto."""
     con = conectar()
+    corte = _corte_iso()
+    # limpa corpos fora da janela (mantém o banco enxuto)
+    con.execute("UPDATE noticias SET corpo='' WHERE data_iso < ? AND "
+                "corpo IS NOT NULL AND corpo != ''", (corte,))
+    con.commit()
     pend = [u for (u,) in con.execute(
         "SELECT url FROM noticias WHERE (corpo IS NULL OR corpo='') AND "
-        + CAT_RELEVANTE)]
+        "data_iso >= ?", (corte,))]
     con.close()
+    print(f"[noticias] janela desde {corte}")
     print(f"[noticias] corpos a baixar: {len(pend)}")
     feitos = vazios = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
