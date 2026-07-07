@@ -19,6 +19,7 @@ INF_DB_PATH = os.environ.get("INF_DB_PATH", os.path.join(os.path.dirname(os.path
 TERMOS_DB_PATH = os.environ.get("TERMOS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "termos.db"))
 JULGAR_DB_PATH = os.environ.get("JULGAR_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "julgar.db"))
 QUEM_DB_PATH = os.environ.get("QUEM_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "quem.db"))
+PAUTAS_DB_PATH = os.environ.get("PAUTAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pautas.db"))
 
 st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
@@ -1514,6 +1515,91 @@ def render_painel():
                 st.info("Sem histórico de relatoria nos informativos para este processo.")
 
 
+@st.cache_data(ttl=300)
+def carregar_pautas():
+    """Retorna (processos da pauta ATUAL, retirados, meta) ou (None, None, {})."""
+    if not os.path.exists(PAUTAS_DB_PATH):
+        return None, None, {}
+    con = sqlite3.connect(PAUTAS_DB_PATH)
+    try:
+        ult = con.execute("SELECT fonte,atualizada_em FROM snapshots "
+                          "ORDER BY coletado_em DESC LIMIT 1").fetchone()
+        if not ult:
+            con.close()
+            return None, None, {}
+        fonte, atualizada = ult
+        pau = pd.read_sql("SELECT * FROM pauta_processos WHERE fonte=:f",
+                          con, params={"f": fonte})
+        ret = pd.read_sql("SELECT * FROM retirados ORDER BY detectado_em DESC", con)
+        n_snaps = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    except Exception:
+        con.close()
+        return None, None, {}
+    con.close()
+    return pau, ret, {"fonte": fonte, "atualizada": atualizada, "snapshots": n_snaps}
+
+
+def render_pautas():
+    st.subheader("🗓️ Pautas de Julgamento — CVM")
+    pau, ret, meta = carregar_pautas()
+    if pau is None:
+        st.info("⏳ A base de Pautas de Julgamento ainda não está disponível.")
+        return
+    st.caption(f"Pauta atual atualizada em **{meta['atualizada']}** · fonte: "
+               f"{meta['fonte']} · {meta['snapshots']} snapshot(s) acumulado(s). "
+               "O rastreio de 'tirado de pauta' começa a partir do 1º snapshot.")
+    hoje = dt.date.today()
+    jul, _ = carregar_julgar()
+    a_julgar = set(jul["proc_norm"]) - {""} if jul is not None else set()
+    julg = carregar_julgados()
+    set_julg = set(julg["proc_norm"]) - {""} if julg is not None else set()
+
+    # futuras x passadas
+    pau = pau.copy()
+    pau["fut"] = pau["data_sessao_iso"].apply(
+        lambda d: bool(d) and d >= hoje.isoformat())
+    pau["Também em 'A Julgar'"] = pau["proc_norm"].apply(
+        lambda p: "sim" if p in a_julgar else "")
+    fut = pau[pau["fut"]].sort_values("data_sessao_iso")
+    st.markdown(f"#### 📅 Próximas sessões ({len(fut)})")
+    if len(fut):
+        cols = ["data_sessao", "horario", "processo", "relator", "superintendencia",
+                "objeto", "Também em 'A Julgar'"]
+        show = fut[cols].rename(columns={
+            "data_sessao": "Sessão", "horario": "Hora", "processo": "Processo",
+            "relator": "Relator", "superintendencia": "Superintendência",
+            "objeto": "Objeto"})
+        st.dataframe(show, use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhuma sessão futura na pauta atual.")
+
+    st.markdown("#### 🚨 Tirados de pauta (alerta)")
+    if ret is not None and len(ret):
+        r2 = ret.copy()
+        r2["status"] = r2["proc_norm"].apply(
+            lambda p: "✅ consta como julgado" if p in set_julg
+            else ("⏳ ainda a julgar" if p in a_julgar else "⚠️ sumiu sem julgamento"))
+        show = r2[["processo", "data_sessao", "relator", "status", "detectado_em",
+                   "objeto"]].rename(columns={
+            "processo": "Processo", "data_sessao": "Estava p/ sessão",
+            "relator": "Relator", "status": "Status", "detectado_em": "Saiu em",
+            "objeto": "Objeto"})
+        st.caption("Processos que estavam pautados e saíram da pauta seguinte. "
+                   "⚠️ 'sumiu sem julgamento' é o que merece atenção.")
+        st.dataframe(show, use_container_width=True, hide_index=True)
+    else:
+        st.success("Nenhum processo tirado de pauta detectado até agora "
+                   "(o rastreio começa quando surge a 2ª versão da pauta).")
+    st.markdown("#### 📋 Pauta atual completa")
+    show = pau[["data_sessao", "processo", "relator", "superintendencia",
+                "objeto"]].rename(columns={
+        "data_sessao": "Sessão", "processo": "Processo", "relator": "Relator",
+        "superintendencia": "Superintendência", "objeto": "Objeto"})
+    st.dataframe(show, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="pautas_julgamento.csv", mime="text/csv")
+
+
 def render_quem():
     st.subheader("👥 Quem é Quem — CVM")
     df = carregar_quem()
@@ -1633,7 +1719,8 @@ def render_audiencias():
 # --------------------------------------------------------------------------
 SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
-          "📋 Atas do CGE", "📰 Informativos do Colegiado", "👥 Quem é Quem"]
+          "🗓️ Pautas de Julgamento", "📋 Atas do CGE",
+          "📰 Informativos do Colegiado", "👥 Quem é Quem"]
 
 
 def main():
@@ -1661,11 +1748,13 @@ def main():
         st.subheader("📂 Processos Não-Sancionadores — CVM")
         render_nao_sancionadores()
     elif sel == SECOES[5]:
-        render_atas()
+        render_pautas()
     elif sel == SECOES[6]:
+        render_atas()
+    elif sel == SECOES[7]:
         st.subheader("📰 Informativos do Colegiado — CVM")
         render_informativos()
-    elif sel == SECOES[7]:
+    elif sel == SECOES[8]:
         render_quem()
 
 
