@@ -437,14 +437,21 @@ def render_julgados_lista():
         st.markdown("**Julgados por relator:**")
         st.dataframe(resumo, use_container_width=True, hide_index=True)
 
+    lk = _mapa_link_pas()  # proc_norm -> URL da página do processo na CVM
+    res["Link"] = res["proc_norm"].map(lambda pn: lk.get(pn, "")) \
+        if "proc_norm" in res.columns else ""
     cols = ["data_julg", "relator_nome", "processo", "tipo", "rito", "sup",
-            "Colegiado atual"]
+            "Colegiado atual", "Link"]
     show = res[[c for c in cols if c in res.columns]].rename(columns={
         "data_julg": "Julgado em", "relator_nome": "Relator (julgamento)",
         "processo": "Processo", "tipo": "Tipo", "rito": "Rito",
         "sup": "Superintendência"})
-    tabela(show, datas=["Julgado em"], use_container_width=True,
-           hide_index=True, height=460)
+    st.caption("👆 Clique em **abrir ↗** para ver o processo no site da CVM "
+               "(disponível quando o processo está na base de Sancionadores).")
+    tabela(show, datas=["Julgado em"], use_container_width=True, hide_index=True,
+           height=460,
+           column_config={"Link": st.column_config.LinkColumn(
+               "CVM", display_text="abrir ↗")})
     st.download_button(
         "⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
         file_name="processos_julgados_cvm.csv", mime="text/csv")
@@ -491,6 +498,7 @@ def estatisticas_prazos():
     rel_df = carregar_relatores()
     mrel = mapa_relator_atual()
     aber = _mapa_abertura()
+    lk = _mapa_link_pas()  # proc_norm -> URL da página do processo na CVM
     hoje = dt.date.today()
     eventos = {}
     if rel_df is not None:
@@ -524,7 +532,8 @@ def estatisticas_prazos():
                 "Relator": membro["nome"], "Processo": r["processo"],
                 "Relator desde": desde,
                 "Como relator há (dias)": (hoje - d0).days if d0 else None,
-                "Abertura do processo": aber.get(pn, "—"), "proc_norm": pn})
+                "Abertura do processo": aber.get(pn, "—"),
+                "Link": lk.get(pn, ""), "proc_norm": pn})
             if pn and base_pn and pn not in base_pn:
                 fora_base.append(r["processo"])
     julgados = []
@@ -541,7 +550,8 @@ def estatisticas_prazos():
                 "Relator": membro["nome"], "Processo": r["processo"],
                 "Recebeu relatoria": drel.strftime("%d/%m/%Y") if drel else "—",
                 "Julgado em": r["data_julg"],
-                "Tempo até julgar (dias)": (dj - drel).days if (dj and drel) else None})
+                "Tempo até julgar (dias)": (dj - drel).days if (dj and drel) else None,
+                "Link": lk.get(r["proc_norm"], "")})
     return pd.DataFrame(estoque), pd.DataFrame(julgados), fora_base
 
 
@@ -595,18 +605,22 @@ def render_prazos():
               f"{int(idade.max())} dias" if len(idade) else "—")
     tj = j["Tempo até julgar (dias)"].dropna() if len(j) else pd.Series(dtype=float)
     c3.metric("Tempo médio até julgar", f"{int(tj.mean())} dias" if len(tj) else "—")
+    link_cfg = {"Link": st.column_config.LinkColumn("CVM", display_text="abrir ↗")}
     st.markdown("**📥 Estoque — o que está há mais tempo com o relator (topo = mais antigo):**")
     if len(e):
         tabela(e.drop(columns=["Relator", "proc_norm"]),
                datas=["Relator desde", "Abertura do processo"],
-               dias=["Como relator há (dias)"], use_container_width=True, hide_index=True)
+               dias=["Como relator há (dias)"], column_config=link_cfg,
+               use_container_width=True, hide_index=True)
+        st.caption("👆 Clique em **abrir ↗** para ver o processo no site da CVM.")
         st.bar_chart(e.set_index("Processo")["Como relator há (dias)"].head(20))
     else:
         st.info("Sem processos em estoque para este relator.")
     st.markdown("**✅ Julgados — quando recebeu a relatoria × quando julgou:**")
     if len(j):
         tabela(j.drop(columns=["Relator"]), datas=["Recebeu relatoria", "Julgado em"],
-               dias=["Tempo até julgar (dias)"], use_container_width=True, hide_index=True)
+               dias=["Tempo até julgar (dias)"], column_config=link_cfg,
+               use_container_width=True, hide_index=True)
     else:
         st.info("Sem julgados atribuídos a este relator na planilha de julgados.")
 
