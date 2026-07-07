@@ -358,6 +358,15 @@ def _to_date(s):
     return dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
 
 
+def _dias_desde(s):
+    """Nº de dias de uma data DD/MM/AAAA até hoje (int, ordenável). None se inválida."""
+    d = _to_date(s)
+    if not d:
+        return None
+    n = (dt.date.today() - d).days
+    return n if n >= 0 else None
+
+
 @st.cache_data(ttl=300)
 def estatisticas_prazos():
     """Estoque (A Julgar) e julgados por relator — SÓ do Colegiado atual, com o
@@ -1614,21 +1623,7 @@ def render_painel():
                    "**Designado em** = início com o relator atual (planilha). **Tempo** = "
                    "desde a designação. **Trocas de relator** = redistribuições registradas "
                    "nos Informativos.")
-        hoje = dt.date.today()
         mrel = mapa_relator_atual()
-
-        def _tempo(d):
-            m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(d))
-            if not m:
-                return ""
-            ini = dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-            dias = (hoje - ini).days
-            if dias < 0:
-                return ""
-            if dias < 60:
-                return f"{dias} dias"
-            meses = dias // 30
-            return f"{meses//12}a {meses%12}m" if meses >= 12 else f"{meses} meses"
 
         def _ded(r):
             info = mrel.get(r["proc_norm"])
@@ -1642,14 +1637,17 @@ def render_painel():
             return info[5] if info else 0
         v = jul.copy()
         v["Designado em"] = v["dt_inicio"]
-        v["Tempo decorrido"] = v["dt_inicio"].apply(_tempo)
+        v["Tempo decorrido"] = v["dt_inicio"].apply(_dias_desde)
         v["Trocas de relator"] = v.apply(_trocas, axis=1)
         v["Deduzido (informativos)"] = v.apply(_ded, axis=1)
         show = v[["relator_nome", "processo", "tipo", "Designado em",
                   "Tempo decorrido", "Trocas de relator",
                   "Deduzido (informativos)"]].rename(columns={
             "relator_nome": "Relator oficial", "processo": "Processo", "tipo": "Tipo"})
-        st.dataframe(show, use_container_width=True, hide_index=True, height=380)
+        st.dataframe(show, use_container_width=True, hide_index=True, height=380,
+                     column_config={"Tempo decorrido": st.column_config.NumberColumn(
+                         "Tempo decorrido", format="%d dias",
+                         help="Dias desde a designação (ordena pelo total de dias).")})
         st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                            file_name="processos_a_julgar.csv", mime="text/csv")
         # historico de relatoria por processo (expander)
@@ -1804,20 +1802,6 @@ def render_pautas():
                        file_name="pautas_julgamento.csv", mime="text/csv")
 
 
-def _tempo_desde(data_str):
-    m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(data_str or ""))
-    if not m:
-        return ""
-    d0 = dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    dias = (dt.date.today() - d0).days
-    if dias < 0:
-        return ""
-    if dias < 60:
-        return f"{dias} dias"
-    meses = dias // 30
-    return f"{meses // 12}a {meses % 12}m" if meses >= 12 else f"{meses} meses"
-
-
 @st.cache_data(ttl=300)
 def _mapa_abertura():
     """proc_norm -> data de abertura (dos Processos Sancionadores), quando houver."""
@@ -1865,10 +1849,11 @@ def processos_do_relator(nome_pessoa):
         abertura = aber.get(pn, "")
         out.append({
             "Processo": proc_disp.get(pn, pn), "Sigla": info[0],
-            "Relator desde": info[1], "Tempo como relator": _tempo_desde(info[1]),
+            "Relator desde": info[1], "Relator há (dias)": _dias_desde(info[1]),
             "Abertura do processo": abertura or (f"(ano {ano})" if ano else "—"),
-            "Tempo desde a abertura": _tempo_desde(abertura), "Trocas": info[5]})
-    return sorted(out, key=lambda x: x["Relator desde"], reverse=True)
+            "Aberto há (dias)": _dias_desde(abertura), "Trocas": info[5]})
+    return sorted(out, key=lambda x: (x["Relator há (dias)"] is None,
+                                      -(x["Relator há (dias)"] or 0)))
 
 
 def impedimentos_da_pessoa(nome_pessoa):
@@ -1897,10 +1882,14 @@ def dialog_relator(nome, cargo, sigla):
     c1.metric("Processos como relator atual", len(procs))
     c2.metric("Impedimentos / suspeições declarados", len(imped))
     st.markdown("#### ⚖️ Processos sob relatoria")
-    st.caption("*Relator desde* = última vez sorteado/redistribuído relator do "
-               "processo. *Abertura* = do processo sancionador (ou o ano do número).")
+    st.caption("*Relator desde* = última vez sorteado/redistribuído relator. *Abertura* "
+               "= do processo sancionador (ou o ano do nº). Colunas de tempo em **dias** "
+               "(clique no cabeçalho para ordenar pelo total de dias).")
     if procs:
-        st.dataframe(pd.DataFrame(procs), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(procs), use_container_width=True, hide_index=True,
+                     column_config={
+                         "Relator há (dias)": st.column_config.NumberColumn(format="%d dias"),
+                         "Aberto há (dias)": st.column_config.NumberColumn(format="%d dias")})
     else:
         st.info("Nenhum processo com esta pessoa como relator atual nos informativos.")
     st.markdown("#### 🚫 Impedimentos e suspeições")
