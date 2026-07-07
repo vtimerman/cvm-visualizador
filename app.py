@@ -368,11 +368,86 @@ def dialog_processo(row, acus):
 
 
 def render_processos():
-    aba1, aba2 = st.tabs(["⚖️ Processos", "📊 Prazos por relator"])
+    aba1, aba2, aba3 = st.tabs(
+        ["⚖️ Processos", "✅ Julgados", "📊 Prazos por relator"])
     with aba1:
         render_processos_lista()
     with aba2:
+        render_julgados_lista()
+    with aba3:
         render_prazos()
+
+
+def render_julgados_lista():
+    """Lista TODOS os processos julgados pelo Colegiado (planilha oficial),
+    com o relator do julgamento — inclusive ex-diretores. Marca quem ainda
+    está no Colegiado atual, para cruzar com a aba de Prazos."""
+    julg = carregar_julgados()
+    _, meta = carregar_julgar()
+    if julg is None or len(julg) == 0:
+        st.info("⏳ A base de processos julgados ainda não foi carregada.")
+        return
+    df = julg.copy()
+    df["_ano"] = df["data_julg"].astype(str).str.slice(6, 10)
+    df["_membro"] = df["relator_nome"].map(
+        lambda n: (relator_no_colegiado(n) or {}).get("nome"))
+    df["Colegiado atual"] = df["_membro"].map(lambda x: "✓" if x else "")
+    fonte = meta.get("fonte_julgados", "")
+    st.caption(
+        (f"{len(df):,} processos julgados pelo Colegiado".replace(",", "."))
+        + (f" · fonte: {fonte}" if fonte else "")
+        + " · o relator é o do **julgamento** (pode ser ex-diretor).")
+
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        q_txt = c1.text_input("Nº do processo contém", key="jg_txt")
+        anos = sorted((a for a in df["_ano"].unique() if a), reverse=True)
+        f_ano = c2.multiselect("Ano do julgamento", anos, key="jg_ano")
+        tipos = sorted(t for t in df["tipo"].dropna().unique() if t)
+        f_tipo = c3.multiselect("Tipo", tipos, key="jg_tipo")
+        c4, c5 = st.columns([3, 2])
+        rels = sorted(r for r in df["relator_nome"].dropna().unique() if r)
+        f_rel = c4.multiselect("Relator (no julgamento)", rels, key="jg_rel")
+        so_atual = c5.checkbox("Só relatores do Colegiado atual", key="jg_atual")
+
+    m = pd.Series(True, index=df.index)
+    if q_txt.strip():
+        m &= df["processo"].str.contains(q_txt, case=False, na=False)
+    if f_ano:
+        m &= df["_ano"].isin(f_ano)
+    if f_tipo:
+        m &= df["tipo"].isin(f_tipo)
+    if f_rel:
+        m &= df["relator_nome"].isin(f_rel)
+    if so_atual:
+        m &= df["_membro"].notna()
+
+    res = df[m].copy()
+    res["_d"] = pd.to_datetime(res["data_julg"], dayfirst=True, errors="coerce")
+    res = res.sort_values("_d", ascending=False).reset_index(drop=True)
+    st.metric("Julgados encontrados", f"{len(res):,}".replace(",", "."))
+
+    # resumo por relator (nome canônico do board quando for do Colegiado atual)
+    if len(res):
+        chave = res["_membro"].fillna(res["relator_nome"])
+        resumo = (chave.value_counts().rename_axis("Relator")
+                  .reset_index(name="Julgados"))
+        resumo["Colegiado atual"] = resumo["Relator"].map(
+            lambda n: "✓" if any(res.loc[chave == n, "_membro"].notna()) else "")
+        st.markdown("**Julgados por relator:**")
+        st.dataframe(resumo, use_container_width=True, hide_index=True)
+
+    cols = ["data_julg", "relator_nome", "processo", "tipo", "rito", "sup",
+            "Colegiado atual"]
+    show = res[[c for c in cols if c in res.columns]].rename(columns={
+        "data_julg": "Julgado em", "relator_nome": "Relator (julgamento)",
+        "processo": "Processo", "tipo": "Tipo", "rito": "Rito",
+        "sup": "Superintendência"})
+    tabela(show, datas=["Julgado em"], use_container_width=True,
+           hide_index=True, height=460)
+    st.download_button(
+        "⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+        file_name="processos_julgados_cvm.csv", mime="text/csv")
 
 
 def _to_date(s):
@@ -423,9 +498,6 @@ def estatisticas_prazos():
             d = _to_date(r["data"])
             if d:
                 eventos.setdefault(r["proc_norm"], []).append(d)
-    # pessoas do Colegiado atual (só elas entram)
-    board = {_slug(pessoa_de_sigla(m["sigla"])): pessoa_de_sigla(m["sigla"])
-             for m in colegiado_atual()}
     # base de sancionadores (para o gap-check)
     proc_pas, _ = carregar_pas()
     base_pn = set()
@@ -438,15 +510,18 @@ def estatisticas_prazos():
             pn = r["proc_norm"]
             info = mrel.get(pn)
             # relator ATUAL dos informativos; se não houver, cai p/ a planilha
-            pessoa = pessoa_de_sigla(info[0], info[1]) if info \
-                else pessoa_de_nome(r["relator_nome"])
-            if _slug(pessoa) not in board:
+            nome_rel = pessoa_de_sigla(info[0], info[1]) if info \
+                else r["relator_nome"]
+            # casa por sobrenome+primeiro nome com o Colegiado atual (robusto a
+            # variações de grafia, ex.: "Otto Lobo" x nome completo do Presidente)
+            membro = relator_no_colegiado(nome_rel)
+            if not membro:
                 continue
             # "relator desde": última distribuição registrada (informativos)
             desde = info[1] if info else r["dt_inicio"]
             d0 = _to_date(desde)
             estoque.append({
-                "Relator": board[_slug(pessoa)], "Processo": r["processo"],
+                "Relator": membro["nome"], "Processo": r["processo"],
                 "Relator desde": desde,
                 "Como relator há (dias)": (hoje - d0).days if d0 else None,
                 "Abertura do processo": aber.get(pn, "—"), "proc_norm": pn})
@@ -455,15 +530,15 @@ def estatisticas_prazos():
     julgados = []
     if julg is not None:
         for _, r in julg.iterrows():
-            pessoa = pessoa_de_nome(r["relator_nome"])
-            if _slug(pessoa) not in board:
+            membro = relator_no_colegiado(r["relator_nome"])
+            if not membro:
                 continue
             dj = _to_date(r["data_julg"])
             evs = [d for d in eventos.get(r["proc_norm"], []) if not dj or d <= dj]
             drel = max(evs) if evs else (min(eventos.get(r["proc_norm"], []))
                                          if eventos.get(r["proc_norm"]) else None)
             julgados.append({
-                "Relator": board[_slug(pessoa)], "Processo": r["processo"],
+                "Relator": membro["nome"], "Processo": r["processo"],
                 "Recebeu relatoria": drel.strftime("%d/%m/%Y") if drel else "—",
                 "Julgado em": r["data_julg"],
                 "Tempo até julgar (dias)": (dj - drel).days if (dj and drel) else None})
