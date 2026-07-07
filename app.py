@@ -21,6 +21,7 @@ JULGAR_DB_PATH = os.environ.get("JULGAR_DB_PATH", os.path.join(os.path.dirname(o
 QUEM_DB_PATH = os.environ.get("QUEM_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "quem.db"))
 PAUTAS_DB_PATH = os.environ.get("PAUTAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pautas.db"))
 NOTICIAS_DB_PATH = os.environ.get("NOTICIAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "noticias.db"))
+DECISOES_DB_PATH = os.environ.get("DECISOES_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "decisoes.db"))
 
 st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
@@ -1632,6 +1633,145 @@ def carregar_pautas():
 
 
 @st.cache_data(ttl=300)
+def carregar_decisoes():
+    if not os.path.exists(DECISOES_DB_PATH):
+        return None
+    con = sqlite3.connect(DECISOES_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM decisoes", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def carregar_atas_colegiado():
+    if not os.path.exists(DECISOES_DB_PATH):
+        return None
+    con = sqlite3.connect(DECISOES_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM atas_colegiado", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+@st.dialog("Decisão do Colegiado", width="large")
+def dialog_decisao(row):
+    if row["link"]:
+        st.link_button("Abrir a decisão no site da CVM ↗", row["link"])
+    st.markdown(f"### {row['ementa']}")
+    linha = [f"**Data:** {row['data']}", f"**Tipo:** {row['tipo']}"]
+    if str(row["processo"]).strip():
+        linha.append(f"**Processo:** {row['processo']}")
+    st.markdown(" · ".join(linha))
+    if str(row["descricao"]).strip():
+        st.markdown("**Resumo da decisão:**")
+        st.info(row["descricao"])
+    pn = row["proc_norm"]
+    if pn:
+        # cruzamentos por número do processo
+        lk = _mapa_link_pas().get(pn)
+        if lk:
+            st.markdown(f"🔗 [Página do processo sancionador ↗]({lk})")
+        tc = mapa_tc().get(pn)
+        if tc:
+            st.markdown(f"🤝 **Termo de Compromisso:** {tc}")
+        _, delibs = sobre_processo(pn)
+        if delibs:
+            st.markdown(f"📰 **{len(delibs)} deliberação(ões) nos Informativos** deste processo:")
+            for data, inf, tipo, assunto, resumo, decisao, link in delibs[:8]:
+                txt = str(resumo).strip() or str(assunto).strip()
+                st.markdown(f"- **{data}** (Inf. nº {inf}): {txt[:160]}"
+                            + (f" [ver ↗]({link})" if link else ""))
+
+
+def render_decisoes():
+    st.subheader("⚖️ Decisões do Colegiado + Atas — CVM")
+    dec = carregar_decisoes()
+    atc = carregar_atas_colegiado()
+    if dec is None and atc is None:
+        st.info("⏳ A base de Decisões/Atas do Colegiado ainda está sendo coletada.")
+        return
+    nd = len(dec) if dec is not None else 0
+    na = len(atc) if atc is not None else 0
+    st.caption(f"{nd:,} decisões do Colegiado • {na:,} atas de reuniões. "
+               "Fonte: conteudo.cvm.gov.br/decisoes.".replace(",", "."))
+    aba_d, aba_a = st.tabs(["📜 Decisões", "📋 Atas do Colegiado"])
+
+    with aba_d:
+        if dec is None or len(dec) == 0:
+            st.info("Base de decisões ainda não disponível.")
+        else:
+            with st.expander("🔎 Filtros", expanded=True):
+                c1, c2 = st.columns([2, 1])
+                q = c1.text_input("Buscar (ementa, resumo, nº do processo)", key="dc_q",
+                                  help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+                tipos = sorted(x for x in dec["tipo"].dropna().unique() if x)
+                f_tipo = c2.multiselect("Tipo", tipos, key="dc_tipo")
+                c3, c4 = st.columns(2)
+                proc = c3.text_input("Processo (nº)", key="dc_proc",
+                                     placeholder="ex.: 19957.008636")
+                anos = sorted({a[:4] for a in dec["data_iso"].dropna() if a}, reverse=True)
+                f_ano = c4.multiselect("Ano", anos, key="dc_ano")
+            m = pd.Series(True, index=dec.index)
+            if q.strip():
+                m &= match_busca(dec, ["ementa", "descricao", "processo"], q)
+            if f_tipo:
+                m &= dec["tipo"].isin(f_tipo)
+            if proc.strip():
+                m &= dec["processo"].fillna("").str.contains(
+                    re.escape(proc.strip()), case=False, na=False)
+            if f_ano:
+                m &= dec["data_iso"].str[:4].isin(f_ano)
+            res = dec[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
+            st.metric("Decisões encontradas", f"{len(res):,}".replace(",", "."))
+            show = res[["data", "tipo", "processo", "ementa", "link"]].rename(columns={
+                "data": "Data", "tipo": "Tipo", "processo": "Processo",
+                "ementa": "Ementa", "link": "Link"})
+            st.caption("👆 Clique numa linha para ver o resumo e os cruzamentos.")
+            ev = tabela(show, datas=["Data"], use_container_width=True, hide_index=True,
+                        height=460, on_select="rerun", selection_mode="single-row",
+                        column_config={"Link": st.column_config.LinkColumn(
+                            "Link", display_text="abrir ↗")})
+            st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="decisoes_colegiado.csv", mime="text/csv")
+            sel = ev.selection.rows if getattr(ev, "selection", None) else []
+            if sel:
+                lk = res.iloc[sel[0]]["link"]
+                if lk != st.session_state.get("dlg_dec"):
+                    st.session_state["dlg_dec"] = lk
+                    dialog_decisao(res.iloc[sel[0]])
+
+    with aba_a:
+        if atc is None or len(atc) == 0:
+            st.info("Base de atas do Colegiado ainda não disponível.")
+        else:
+            c1, c2 = st.columns([2, 1])
+            q = c1.text_input("Buscar (título)", key="at_q")
+            anos = sorted({a[:4] for a in atc["data_iso"].dropna() if a}, reverse=True)
+            f_ano = c2.multiselect("Ano", anos, key="at_ano")
+            m = pd.Series(True, index=atc.index)
+            if q.strip():
+                for w in q.lower().split():
+                    m &= atc["titulo"].fillna("").str.lower().str.contains(
+                        re.escape(w), na=False)
+            if f_ano:
+                m &= atc["data_iso"].str[:4].isin(f_ano)
+            r2 = atc[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
+            st.metric("Atas encontradas", f"{len(r2):,}".replace(",", "."))
+            show = r2[["data", "tipo", "titulo", "link"]].rename(columns={
+                "data": "Data", "tipo": "Tipo", "titulo": "Título", "link": "Link"})
+            tabela(show, datas=["Data"], use_container_width=True, hide_index=True,
+                   height=460, column_config={"Link": st.column_config.LinkColumn(
+                       "Link", display_text="abrir ↗")})
+            st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="atas_colegiado.csv", mime="text/csv")
+
+
+@st.cache_data(ttl=300)
 def carregar_noticias():
     if not os.path.exists(NOTICIAS_DB_PATH):
         return None
@@ -2027,7 +2167,7 @@ def render_audiencias():
 # --------------------------------------------------------------------------
 SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
-          "🗓️ Pautas de Julgamento", "📋 Atas do CGE",
+          "🗓️ Pautas de Julgamento", "📜 Decisões do Colegiado", "📋 Atas do CGE",
           "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias"]
 
 
@@ -2058,13 +2198,15 @@ def main():
     elif sel == SECOES[5]:
         render_pautas()
     elif sel == SECOES[6]:
-        render_atas()
+        render_decisoes()
     elif sel == SECOES[7]:
+        render_atas()
+    elif sel == SECOES[8]:
         st.subheader("📰 Informativos do Colegiado — CVM")
         render_informativos()
-    elif sel == SECOES[8]:
-        render_quem()
     elif sel == SECOES[9]:
+        render_quem()
+    elif sel == SECOES[10]:
         render_noticias()
 
 
