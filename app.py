@@ -10,6 +10,8 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import noticias_cruzamento as _nx
+
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 URL_BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
 PAS_DB_PATH = os.environ.get("PAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "processos.db"))
@@ -361,6 +363,8 @@ def dialog_processo(row, acus):
     components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
                     + len(decs[:40]) * 30
                     + len(desp[:40]) * 34, scrolling=True)
+    nomes_ac = [a["nome"] for _, a in ac.iterrows()] if len(ac) else []
+    _bloco_noticias_md(_norm_proc(row["numero"]), nomes=nomes_ac)
 
 
 def render_processos():
@@ -975,6 +979,7 @@ def dialog_termo(row):
             st.markdown(f"- **{d['data']}** · {d['componente']} · "
                         f"{d['solicitante']} — {d['assunto']}  "
                         f"[abrir ↗]({d['link']})")
+    _bloco_noticias_md(pn, nomes=_nomes_partes(row["partes"]))
 
 
 def render_termos():
@@ -1194,6 +1199,7 @@ def dialog_ns(chave, processo):
         st.markdown(f"#### 📜 Decisões do Colegiado ({len(decs)})")
         for data, tipo, ementa, link in decs[:15]:
             st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link})")
+    _bloco_noticias_md(pn)
     # links de TODAS as decisões, num bloco
     links = [(r["data"], r["inf_numero"], r["link"]) for _, r in g.iterrows() if r["link"]]
     if links:
@@ -1700,6 +1706,42 @@ def decisoes_do_processo(pn):
         rows = []
     con.close()
     return rows
+
+
+@st.cache_data(ttl=600)
+def _base_noticias():
+    """Índice das notícias dos últimos ~2 anos (carregado uma vez, com corpo)."""
+    return _nx.carregar_noticias()
+
+
+def noticias_do_processo(pn, nomes=None):
+    """Notícias (últimos 2 anos) ligadas ao processo por número e/ou por nome.
+
+    `nomes`: razões sociais/nomes das partes (acusados, proponentes) para o match por nome.
+    """
+    return _nx.noticias_relacionadas(pn=pn, nomes=nomes, base=_base_noticias())
+
+
+def _nomes_partes(texto):
+    """Quebra uma string de partes em nomes multi-palavra (>=10 chars) p/ o match por nome."""
+    pedacos = re.split(r"[;,\n]|\be\b", str(texto or ""))
+    return [x.strip(" .;,") for x in pedacos
+            if len(x.strip(" .;,")) >= 10 and " " in x.strip(" .;,")]
+
+
+def _bloco_noticias_md(pn, nomes=None, titulo="#### 📰 Notícias relacionadas"):
+    """Renderiza (em markdown) as notícias relacionadas; nada se não houver."""
+    nots = noticias_do_processo(pn, nomes=nomes)
+    if not nots:
+        return
+    st.markdown(f"{titulo} ({len(nots)})")
+    st.caption("Notícias da CVM (últimos 2 anos) que citam o nº do processo ou o nome "
+               "de uma das partes.")
+    for n in nots[:15]:
+        cat = f" · _{n['categoria']}_" if n.get("categoria") else ""
+        st.markdown(f"- **{n['data']}**{cat} — [{n['titulo']}]({n['url']})  "
+                    f"<span style='color:#888;font-size:11px'>({n['motivo']})</span>",
+                    unsafe_allow_html=True)
 
 
 @st.dialog("Decisão do Colegiado", width="large")
