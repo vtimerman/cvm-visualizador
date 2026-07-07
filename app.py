@@ -20,6 +20,7 @@ TERMOS_DB_PATH = os.environ.get("TERMOS_DB_PATH", os.path.join(os.path.dirname(o
 JULGAR_DB_PATH = os.environ.get("JULGAR_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "julgar.db"))
 QUEM_DB_PATH = os.environ.get("QUEM_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "quem.db"))
 PAUTAS_DB_PATH = os.environ.get("PAUTAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pautas.db"))
+NOTICIAS_DB_PATH = os.environ.get("NOTICIAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "noticias.db"))
 
 st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
@@ -1258,23 +1259,31 @@ def relator_valido(nome_oficial):
 
 @st.cache_data(ttl=300)
 def mapa_diretores():
-    """sigla de diretor -> nome (o mais frequente nos informativos; filtra ruído)."""
-    if not os.path.exists(INF_DB_PATH):
-        return {}
-    con = sqlite3.connect(INF_DB_PATH)
-    try:
-        rows = con.execute("""SELECT sigla,nome,COUNT(*) n FROM siglas
-            WHERE papel='diretor' GROUP BY sigla,nome ORDER BY sigla,n DESC""").fetchall()
-    except Exception:
-        rows = []
-    con.close()
+    """sigla de diretor -> nome. Combina os informativos (diretores históricos, pelo
+    mais frequente) com o Quem é Quem (diretores ATUAIS, autoritativo — cobre novos
+    diretores como Igor Muniz/DIM que aparecem em poucos informativos)."""
     out = {}
-    for sigla, nome, n in rows:
-        if sigla in out or n < 5:
-            continue
-        if nome.split()[0].lower() in _RUIDO_NOME:
-            continue
-        out[sigla] = nome
+    if os.path.exists(INF_DB_PATH):
+        con = sqlite3.connect(INF_DB_PATH)
+        try:
+            rows = con.execute("""SELECT sigla,nome,COUNT(*) n FROM siglas
+                WHERE papel='diretor' GROUP BY sigla,nome ORDER BY sigla,n DESC""").fetchall()
+        except Exception:
+            rows = []
+        con.close()
+        for sigla, nome, n in rows:
+            if sigla in out or n < 3:
+                continue
+            if nome.split()[0].lower() in _RUIDO_NOME:
+                continue
+            out[sigla] = nome
+    # Quem é Quem tem prioridade para os diretores atuais (sigla oficial + nome)
+    board = carregar_quem()
+    if board is not None:
+        for _, r in board[board["e_relator"] == 1].iterrows():
+            sg = str(r["sigla"]).upper()
+            if re.match(r"^(PTE|D[A-Z]{1,3})$", sg):
+                out[sg] = r["nome"]
     return out
 
 
@@ -1539,6 +1548,57 @@ def carregar_pautas():
     return pau, ret, {"fonte": fonte, "atualizada": atualizada, "snapshots": n_snaps}
 
 
+@st.cache_data(ttl=300)
+def carregar_noticias():
+    if not os.path.exists(NOTICIAS_DB_PATH):
+        return None
+    con = sqlite3.connect(NOTICIAS_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM noticias", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+def render_noticias():
+    st.subheader("📰 Notícias da CVM")
+    df = carregar_noticias()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base de notícias ainda está sendo populada.")
+        return
+    nsanc = int(df["categoria"].str.contains("SANCION", case=False, na=False).sum())
+    st.caption(f"{len(df):,} notícias publicadas pela CVM • {nsanc} de atividade "
+               "sancionadora. Fonte: gov.br/cvm • Notícias.".replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2 = st.columns([2, 1])
+        q = c1.text_input("Buscar (título, resumo, tags)", key="nt_q",
+                          help='Palavras juntas = E. "aspas" = frase exata. Vírgula = OU.')
+        cats = sorted(c for c in df["categoria"].dropna().unique() if c)
+        f_cat = c2.multiselect("Categoria", cats, key="nt_cat",
+                               help="Ex.: ATIVIDADE SANCIONADORA, ALERTA AO MERCADO…")
+        c3, c4 = st.columns(2)
+        anos = sorted({a[:4] for a in df["data_iso"].dropna() if a}, reverse=True)
+        f_ano = c3.multiselect("Ano", anos, key="nt_ano")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        m &= match_busca(df, ["titulo", "resumo", "tags"], q)
+    if f_cat:
+        m &= df["categoria"].isin(f_cat)
+    if f_ano:
+        m &= df["data_iso"].str[:4].isin(f_ano)
+    res = df[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
+    st.metric("Notícias encontradas", f"{len(res):,}".replace(",", "."))
+    show = res[["data", "categoria", "titulo", "resumo", "url"]].rename(columns={
+        "data": "Data", "categoria": "Categoria", "titulo": "Título",
+        "resumo": "Resumo", "url": "Link"})
+    st.dataframe(
+        show, use_container_width=True, hide_index=True, height=460,
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="noticias_cvm.csv", mime="text/csv")
+
+
 def render_pautas():
     st.subheader("🗓️ Pautas de Julgamento — CVM")
     pau, ret, meta = carregar_pautas()
@@ -1610,7 +1670,7 @@ def render_quem():
     st.caption(f"{len(df)} pessoas do organograma da CVM • {nrel} no Colegiado "
                "(Presidente + Diretores — os únicos que podem ser relator). "
                "Fonte: gov.br/cvm • Quem é Quem.")
-    # relatoria: quantos processos 'a julgar' cada membro do Colegiado tem
+    # relatoria: 'a julgar' (planilha oficial) e relatoria total (dos informativos)
     jul, _ = carregar_julgar()
     cont_jul = {}
     if jul is not None and len(jul):
@@ -1618,6 +1678,12 @@ def render_quem():
             m = relator_no_colegiado(r["relator_nome"])
             if m:
                 cont_jul[m["sigla"]] = cont_jul.get(m["sigla"], 0) + 1
+    # nº de processos em que a pessoa é o relator ATUAL (deduzido dos informativos)
+    cont_rel = {}
+    for pn, info in mapa_relator_atual().items():
+        nome = pessoa_de_sigla(info[0], info[1])
+        if nome:
+            cont_rel[_slug(nome)] = cont_rel.get(_slug(nome), 0) + 1
     with st.expander("🔎 Filtros", expanded=True):
         c1, c2 = st.columns([2, 1])
         q = c1.text_input("Buscar (nome, cargo, sigla, e-mail)", key="qq_q")
@@ -1633,14 +1699,21 @@ def render_quem():
     res = df[m].copy()
     res["a_julgar"] = res.apply(
         lambda r: cont_jul.get(r["sigla"], 0) if r["e_relator"] == 1 else None, axis=1)
+    res["relatoria"] = res.apply(
+        lambda r: cont_rel.get(_slug(pessoa_de_sigla(r["sigla"])), 0)
+        if r["e_relator"] == 1 else None, axis=1)
     res = res.sort_values(["e_relator", "cargo"], ascending=[False, True])
     st.metric("Pessoas encontradas", len(res))
     if nrel:
         st.markdown("**⚖️ Colegiado atual** (quem pode ser relator):")
-        board = res[res["e_relator"] == 1][["nome", "cargo", "sigla", "email", "a_julgar"]]
+        st.caption("*Processos a julgar* = da planilha oficial 'A Julgar' (snapshot). "
+                   "*Relator de* = processos em que a pessoa é o relator atual, deduzido "
+                   "dos Informativos (cobre quem não está na planilha, como novos diretores).")
+        board = res[res["e_relator"] == 1][
+            ["nome", "cargo", "sigla", "email", "a_julgar", "relatoria"]]
         st.dataframe(board.rename(columns={
             "nome": "Nome", "cargo": "Cargo", "sigla": "Sigla", "email": "E-mail",
-            "a_julgar": "Processos a julgar"}),
+            "a_julgar": "Processos a julgar", "relatoria": "Relator de (informativos)"}),
             use_container_width=True, hide_index=True)
     cols = ["nome", "cargo", "sigla", "email", "telefone", "perfil"]
     show = res[cols].rename(columns={
@@ -1720,7 +1793,7 @@ def render_audiencias():
 SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
           "🗓️ Pautas de Julgamento", "📋 Atas do CGE",
-          "📰 Informativos do Colegiado", "👥 Quem é Quem"]
+          "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias"]
 
 
 def main():
@@ -1756,6 +1829,8 @@ def main():
         render_informativos()
     elif sel == SECOES[8]:
         render_quem()
+    elif sel == SECOES[9]:
+        render_noticias()
 
 
 if __name__ == "__main__":

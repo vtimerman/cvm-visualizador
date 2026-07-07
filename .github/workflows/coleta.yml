@@ -58,6 +58,8 @@ jobs:
           else
             python scraper.py atualizar
             python scraper.py stats
+            # Noticias da CVM: pull incremental a cada coleta (barato)
+            python noticias_baixar.py || true
             # Processos Sancionadores: 1x/dia (por volta das 09h UTC), nao a cada 30min.
             # (a re-varredura de ids vazios roda localmente, semanal - e' pesada)
             hora=$(date -u +%H)
@@ -79,7 +81,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add audiencias.db processos.db
+          git add audiencias.db processos.db noticias.db
           if git diff --cached --quiet; then
             echo "Sem mudancas na base."
           else
