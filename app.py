@@ -5,6 +5,7 @@ import re
 import sqlite3
 import unicodedata
 import datetime as dt
+from collections import Counter
 
 import pandas as pd
 import streamlit as st
@@ -267,6 +268,52 @@ def carregar_pas():
     return proc, acus
 
 
+def julgamentos_do_processo(proc_norm):
+    """Registros de julgamento (planilha oficial 'Processos Julgados por Relator')
+    de um processo: relator do julgamento, data, tipo de peça, rito e sup."""
+    if not proc_norm or not os.path.exists(JULGAR_DB_PATH):
+        return []
+    con = sqlite3.connect(JULGAR_DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT relator_nome,data_julg,tipo,rito,sup FROM julgados "
+            "WHERE proc_norm=? ORDER BY data_julg", (proc_norm,)).fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    return [{"relator": r[0], "data": r[1], "tipo": r[2], "rito": r[3], "sup": r[4]}
+            for r in rows]
+
+
+def _desfecho_acusado(situacao, historico=""):
+    """Rótulo curto do desfecho de mérito a partir da situação/histórico do
+    acusado. A situação (status mais recente) tem prioridade; o histórico
+    completa o desfecho (ex.: 'GRU para pagamento de multa' = condenado)."""
+    s = _slug(situacao or "")
+    h = _slug(str(historico or ""))
+    both = s + " || " + h
+    tem_multa = "multa" in both
+    # sinais fortes na situação atual têm prioridade
+    if "absolvi" in s and "condena" not in s:
+        return "Absolvido"
+    if "condena" in s:
+        return "Condenado" + (" c/ multa" if tem_multa else "")
+    if "extincao de punibilidade" in s or "extinta a punibilidade" in s:
+        return "Extinção de punibilidade"
+    # senão, desfecho de mérito pelo histórico
+    if "condena" in h:
+        return "Condenado" + (" c/ multa" if tem_multa else "")
+    if "absolvi" in h:
+        return "Absolvido"
+    if "extincao de punibilidade" in h or "extinta a punibilidade" in h:
+        return "Extinção de punibilidade"
+    if "termo de compromisso" in both or "cumprimento do termo" in both:
+        return "Termo de Compromisso"
+    if tem_multa:  # GRU/pagamento de multa é penalidade de condenação
+        return "Condenado c/ multa"
+    return "—"
+
+
 @st.dialog("Processo Sancionador", width="large")
 def dialog_processo(row, acus):
     st.link_button("Abrir no site da CVM ↗", row["link"])
@@ -280,10 +327,12 @@ def dialog_processo(row, acus):
         f'<td>{e(v)}</td></tr>' for k, v in linhas)
     ac = acus[acus["idproc"] == row["idproc"]] if acus is not None else []
     ac_rows = "".join(
-        f'<tr><td>{e(a["nome"])}</td><td>{e(a["situacao"])}</td>'
+        f'<tr><td>{e(a["nome"])}</td>'
+        f'<td><b>{e(_desfecho_acusado(a["situacao"], a["historico"]))}</b></td>'
+        f'<td>{e(a["situacao"])}</td>'
         f'<td>{e(a["data"])}</td><td>{e(a["historico"])}</td></tr>'
         for _, a in ac.iterrows()) if len(ac) else \
-        '<tr><td colspan="4">— sem acusados —</td></tr>'
+        '<tr><td colspan="5">— sem acusados —</td></tr>'
     # histórico de relatoria cruzado dos Informativos do Colegiado
     hist = historico_relator(_norm_proc(row["numero"]))
     if hist:
@@ -350,18 +399,42 @@ def dialog_processo(row, acus):
         dec_html = ('<h3>Decisões do Colegiado</h3>'
                     '<p style="font-size:13px">— nenhuma decisão do Colegiado '
                     'relacionada (a base ainda cresce) —</p>')
+    # ⚖️ Julgamento (planilha oficial de julgados) + desfecho consolidado
+    julgs = julgamentos_do_processo(_norm_proc(row["numero"]))
+    if julgs:
+        jr = "".join(
+            f'<tr><td style="white-space:nowrap">{e(x["data"])}</td>'
+            f'<td>{e(x["relator"])}</td><td>{e(x["tipo"])}</td>'
+            f'<td>{e(x["rito"])}</td><td>{e(x["sup"])}</td></tr>' for x in julgs)
+        desf = [_desfecho_acusado(a["situacao"], a["historico"])
+                for _, a in ac.iterrows()] if len(ac) else []
+        cont = Counter(d for d in desf if d and d != "—")
+        resumo_desf = " · ".join(f"{v} {k.lower()}" for k, v in cont.items()) or "—"
+        julg_html = (
+            f'<h3>⚖️ Julgamento ({len(julgs)})</h3>'
+            '<p style="font-size:12px">Fonte: planilha oficial "Processos Julgados '
+            'por Relator". O inteiro teor do julgamento (votos e resultado) está na '
+            'pasta de Sancionadores — botão <b>“Abrir no site da CVM ↗”</b> acima.</p>'
+            '<table><tr class="header"><td>Data</td><td>Relator</td><td>Peça</td>'
+            f'<td>Rito</td><td>Sup.</td></tr>{jr}</table>'
+            f'<p style="font-size:13px"><b>Desfecho (por acusado):</b> '
+            f'{e(resumo_desf)}</p>')
+    else:
+        julg_html = ''
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
         '</style></head><body><div id="width">'
         f'<h2>Processo Sancionador nº {e(row["numero"])}</h2>'
         f'<table>{corpo}</table>'
+        f'{julg_html}'
         f'<h3>Acusados ({len(ac)})</h3>'
-        '<table><tr class="header"><td>Nome/Razão social</td><td>Situação</td>'
+        '<table><tr class="header"><td>Nome/Razão social</td><td>Desfecho</td>'
+        '<td>Situação</td>'
         f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
         f'{rel_html}{tc_html}{dec_html}{desp_html}</div></body></html>')
     components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
-                    + len(decs[:40]) * 30
+                    + len(decs[:40]) * 30 + len(julgs) * 32
                     + len(desp[:40]) * 34, scrolling=True)
     nomes_ac = [a["nome"] for _, a in ac.iterrows()] if len(ac) else []
     _bloco_noticias_md(_norm_proc(row["numero"]), nomes=nomes_ac)
@@ -376,6 +449,39 @@ def render_processos():
         render_julgados_lista()
     with aba3:
         render_prazos()
+
+
+@st.cache_data(ttl=300)
+def _mapa_desfecho():
+    """proc_norm -> resumo do desfecho (contagem por tipo), lido das situações/
+    históricos dos acusados na base de Sancionadores."""
+    proc, acus = carregar_pas()
+    if proc is None or acus is None:
+        return {}
+    pn_por_id = {r["idproc"]: _norm_proc(r["numero"]) for _, r in proc.iterrows()}
+    agg = {}
+    for _, a in acus.iterrows():
+        pn = pn_por_id.get(a["idproc"])
+        if not pn:
+            continue
+        d = _desfecho_acusado(a["situacao"], a["historico"])
+        if d and d != "—":
+            agg.setdefault(pn, Counter())[d] += 1
+    return {pn: " · ".join(f"{v} {k.lower()}" for k, v in c.items())
+            for pn, c in agg.items()}
+
+
+@st.dialog("Processo julgado", width="large")
+def dialog_julgado_simples(row):
+    """Ficha mínima para processo julgado que não está na base de Sancionadores."""
+    st.markdown(f"### Processo nº {row.get('processo', '—')}")
+    st.write(f"**Relator (julgamento):** {row.get('relator_nome', '—')}")
+    st.write(f"**Julgado em:** {row.get('data_julg', '—')}  ·  "
+             f"**Peça:** {row.get('tipo', '—')}  ·  "
+             f"**Rito:** {row.get('rito', '—')}  ·  "
+             f"**Sup.:** {row.get('sup', '—')}")
+    st.info("Este processo não está na base de Sancionadores coletada — a ficha "
+            "completa (objeto, acusados, desfecho e links) ainda não está disponível.")
 
 
 def render_julgados_lista():
@@ -437,24 +543,37 @@ def render_julgados_lista():
         st.markdown("**Julgados por relator:**")
         st.dataframe(resumo, use_container_width=True, hide_index=True)
 
-    lk = _mapa_link_pas()  # proc_norm -> URL da página do processo na CVM
-    res["Link"] = res["proc_norm"].map(lambda pn: lk.get(pn, "")) \
+    dmap = _mapa_desfecho()  # proc_norm -> resumo do desfecho por acusado
+    res["Desfecho"] = res["proc_norm"].map(lambda pn: dmap.get(pn, "")) \
         if "proc_norm" in res.columns else ""
     cols = ["data_julg", "relator_nome", "processo", "tipo", "rito", "sup",
-            "Colegiado atual", "Link"]
+            "Desfecho", "Colegiado atual"]
     show = res[[c for c in cols if c in res.columns]].rename(columns={
         "data_julg": "Julgado em", "relator_nome": "Relator (julgamento)",
         "processo": "Processo", "tipo": "Tipo", "rito": "Rito",
         "sup": "Superintendência"})
-    st.caption("👆 Clique em **abrir ↗** para ver o processo no site da CVM "
-               "(disponível quando o processo está na base de Sancionadores).")
-    tabela(show, datas=["Julgado em"], use_container_width=True, hide_index=True,
-           height=460,
-           column_config={"Link": st.column_config.LinkColumn(
-               "CVM", display_text="abrir ↗")})
+    st.caption("👆 Clique numa linha para abrir a **ficha do processo** — desfecho "
+               "por acusado, objeto/ementa, acusados, e links para a pasta de "
+               "Sancionadores e o julgamento.")
+    ev = tabela(show, datas=["Julgado em"], use_container_width=True, hide_index=True,
+                height=460, on_select="rerun", selection_mode="single-row")
     st.download_button(
         "⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
         file_name="processos_julgados_cvm.csv", mime="text/csv")
+    selr = ev.selection.rows if getattr(ev, "selection", None) else []
+    if selr:
+        linha = res.iloc[selr[0]]
+        pn = _norm_proc(linha.get("proc_norm", "")) or \
+            _norm_proc(linha.get("processo", ""))
+        if pn and pn != st.session_state.get("dlg_julg"):
+            st.session_state["dlg_julg"] = pn
+            proc_pas, acus_pas = carregar_pas()
+            hit = proc_pas[proc_pas["numero"].map(_norm_proc) == pn] \
+                if proc_pas is not None else None
+            if hit is not None and len(hit):
+                dialog_processo(hit.iloc[0], acus_pas)
+            else:
+                dialog_julgado_simples(linha)
 
 
 def _to_date(s):
