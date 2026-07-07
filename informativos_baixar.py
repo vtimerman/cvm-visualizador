@@ -50,6 +50,17 @@ def achar_pdftotext():
 PDFTOTEXT = achar_pdftotext()
 
 
+def _get_retry(url, params, tentativas=4):
+    """GET resiliente ao site lento da CVM (retry com backoff)."""
+    for i in range(tentativas):
+        try:
+            return requests.get(url, headers=H, params=params, timeout=90)
+        except requests.exceptions.RequestException:
+            if i == tentativas - 1:
+                raise
+            time.sleep(3 * (i + 1))
+
+
 def listar_urls():
     """(re)coleta URL<TAB>titulo de todas as paginas da busca AJAX."""
     itens, seen = [], set()
@@ -57,7 +68,7 @@ def listar_urls():
         data = {"searchPage": str(page), "itensPagina": "50", "ordenar": "recentes",
                 "lastName": "", "filtro": "", "dataInicio": "", "dataFim": "",
                 "tipos": "", "buscado": "false"}
-        r = requests.get(PAGINA, headers=H, params=data, timeout=40)
+        r = _get_retry(PAGINA, data)
         r.encoding = "windows-1252"
         achou = 0
         for m in re.finditer(
@@ -125,8 +136,7 @@ def extrair_txt(base):
 def main():
     os.makedirs(PDF_DIR, exist_ok=True)
     os.makedirs(TXT_DIR, exist_ok=True)
-    if not os.path.exists(URLS):
-        listar_urls()
+    listar_urls()   # SEMPRE re-lista para descobrir informativos novos
     itens = carregar_lista()
     urls = [u for u, _ in itens]
     print(f"[informativos] {len(urls)} informativos na lista")
