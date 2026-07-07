@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.log
 .lock
+*.db-journal
+*.db-wal
+_pauta_tmp.*
 atas_pdf/
 atas_txt/
 informativos_pdf/
