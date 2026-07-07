@@ -367,6 +367,23 @@ def _dias_desde(s):
     return n if n >= 0 else None
 
 
+def tabela(show, *, datas=(), dias=(), column_config=None, **kw):
+    """st.dataframe com ORDENAÇÃO temporal correta: colunas em `datas` viram
+    datetime (ordena cronologicamente, exibe DD/MM/AAAA) e colunas em `dias` viram
+    número (exibe 'N dias', ordena pelo total). Evita o bug de ordenar texto."""
+    show = show.copy()
+    cfg = dict(column_config or {})
+    for c in datas:
+        if c in show.columns:
+            show[c] = pd.to_datetime(show[c].astype(str).str.strip(),
+                                     dayfirst=True, errors="coerce")
+            cfg.setdefault(c, st.column_config.DateColumn(c, format="DD/MM/YYYY"))
+    for c in dias:
+        if c in show.columns:
+            cfg.setdefault(c, st.column_config.NumberColumn(c, format="%d dias"))
+    return st.dataframe(show, column_config=cfg, **kw)
+
+
 @st.cache_data(ttl=300)
 def estatisticas_prazos():
     """Estoque (A Julgar) e julgados por relator — SÓ do Colegiado atual, com o
@@ -483,14 +500,16 @@ def render_prazos():
     c3.metric("Tempo médio até julgar", f"{int(tj.mean())} dias" if len(tj) else "—")
     st.markdown("**📥 Estoque — o que está há mais tempo com o relator (topo = mais antigo):**")
     if len(e):
-        st.dataframe(e.drop(columns=["Relator", "proc_norm"]),
-                     use_container_width=True, hide_index=True)
+        tabela(e.drop(columns=["Relator", "proc_norm"]),
+               datas=["Relator desde", "Abertura do processo"],
+               dias=["Como relator há (dias)"], use_container_width=True, hide_index=True)
         st.bar_chart(e.set_index("Processo")["Como relator há (dias)"].head(20))
     else:
         st.info("Sem processos em estoque para este relator.")
     st.markdown("**✅ Julgados — quando recebeu a relatoria × quando julgou:**")
     if len(j):
-        st.dataframe(j.drop(columns=["Relator"]), use_container_width=True, hide_index=True)
+        tabela(j.drop(columns=["Relator"]), datas=["Recebeu relatoria", "Julgado em"],
+               dias=["Tempo até julgar (dias)"], use_container_width=True, hide_index=True)
     else:
         st.info("Sem julgados atribuídos a este relator na planilha de julgados.")
 
@@ -554,8 +573,8 @@ def render_processos_lista():
         "tc": "Termo Compr.", "acusados": "Acusados", "link": "Link"})
     st.caption("👆 Clique numa linha para ver acusados, relatoria, Termo de "
                "Compromisso e despachos relacionados.")
-    ev = st.dataframe(
-        show, use_container_width=True, hide_index=True, height=460,
+    ev = tabela(
+        show, datas=["Abertura"], use_container_width=True, hide_index=True, height=460,
         on_select="rerun", selection_mode="single-row",
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
@@ -633,8 +652,8 @@ def render_atas():
         "numero": "Nº", "tipo": "Tipo", "data": "Data",
         "palavras_chave": "Palavras-chave", "resumo": "Resumo (IA)", "link": "Link"})
     st.caption("👆 Clique numa linha para ver a ata completa (metadados, análise de IA e texto).")
-    ev = st.dataframe(
-        show, use_container_width=True, hide_index=True, height=440,
+    ev = tabela(
+        show, datas=["Data"], use_container_width=True, hide_index=True, height=440,
         on_select="rerun", selection_mode="single-row",
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="PDF ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
@@ -748,8 +767,8 @@ def render_informativos():
         "processo": "Processo", "link": "Link"})
     st.caption("👆 Clique numa linha para ver a deliberação completa (assunto, "
                "decisão, análise de IA e texto).")
-    ev = st.dataframe(
-        show, use_container_width=True, hide_index=True, height=460,
+    ev = tabela(
+        show, datas=["Data"], use_container_width=True, hide_index=True, height=460,
         on_select="rerun", selection_mode="single-row",
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="PDF ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
@@ -1000,8 +1019,9 @@ def render_termos():
         "link": "Decisão/Parecer"})
     st.caption("👆 Clique numa linha para ver o TC, a deliberação do Colegiado e "
                "os despachos relacionados.")
-    ev = st.dataframe(
-        show, use_container_width=True, hide_index=True, height=460,
+    ev = tabela(
+        show, datas=["Decisão", "Assinatura", "Publicação", "Arquivamento"],
+        use_container_width=True, hide_index=True, height=460,
         on_select="rerun", selection_mode="single-row",
         column_config={"Decisão/Parecer": st.column_config.LinkColumn(
             "Decisão/Parecer", display_text="abrir ↗")})
@@ -1199,9 +1219,9 @@ def render_nao_sancionadores():
         "area": "Área/Relator", "n": "Nº decisões", "primeira": "1ª decisão",
         "ultima": "Última", "link": "Link"})
     st.caption("👆 Clique numa linha para ver a linha do tempo completa do processo.")
-    ev = st.dataframe(
-        show, use_container_width=True, hide_index=True, height=460,
-        on_select="rerun", selection_mode="single-row",
+    ev = tabela(
+        show, datas=["1ª decisão", "Última"], use_container_width=True,
+        hide_index=True, height=460, on_select="rerun", selection_mode="single-row",
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="PDF ↗")})
     st.download_button("⬇️ Baixar (CSV)",
                        show.to_csv(index=False).encode("utf-8-sig"),
@@ -1609,9 +1629,9 @@ def render_painel():
                 use_container_width=True, hide_index=True)
         if s:
             with st.expander(f"❓ {len(s)} processos a julgar sem relator deduzido nos informativos"):
-                st.dataframe(pd.DataFrame(s).rename(columns={
+                tabela(pd.DataFrame(s).rename(columns={
                     "processo": "Processo", "relator": "Relator oficial",
-                    "tipo": "Tipo", "inicio": "Início"}),
+                    "tipo": "Tipo", "inicio": "Início"}), datas=["Início"],
                     use_container_width=True, hide_index=True)
         if not (d or s or t or jj or rf):
             st.success("Nenhuma inconsistência detectada. 🎉")
@@ -1644,10 +1664,8 @@ def render_painel():
                   "Tempo decorrido", "Trocas de relator",
                   "Deduzido (informativos)"]].rename(columns={
             "relator_nome": "Relator oficial", "processo": "Processo", "tipo": "Tipo"})
-        st.dataframe(show, use_container_width=True, hide_index=True, height=380,
-                     column_config={"Tempo decorrido": st.column_config.NumberColumn(
-                         "Tempo decorrido", format="%d dias",
-                         help="Dias desde a designação (ordena pelo total de dias).")})
+        tabela(show, datas=["Designado em"], dias=["Tempo decorrido"],
+               use_container_width=True, hide_index=True, height=380)
         st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                            file_name="processos_a_julgar.csv", mime="text/csv")
         # historico de relatoria por processo (expander)
@@ -1661,7 +1679,7 @@ def render_painel():
                     [{"Data": d, "Relator": f"{pessoa_de_sigla(rel, d)} ({rel})",
                       "Evento": ev2, "Informativo": f"nº {inf}"}
                      for d, rel, ev2, inf in hist])
-                st.dataframe(dfh, use_container_width=True, hide_index=True)
+                tabela(dfh, datas=["Data"], use_container_width=True, hide_index=True)
             else:
                 st.info("Sem histórico de relatoria nos informativos para este processo.")
 
@@ -1734,8 +1752,8 @@ def render_noticias():
     show = res[["data", "categoria", "titulo", "resumo", "url"]].rename(columns={
         "data": "Data", "categoria": "Categoria", "titulo": "Título",
         "resumo": "Resumo", "url": "Link"})
-    st.dataframe(
-        show, use_container_width=True, hide_index=True, height=460,
+    tabela(
+        show, datas=["Data"], use_container_width=True, hide_index=True, height=460,
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="noticias_cvm.csv", mime="text/csv")
@@ -1771,7 +1789,7 @@ def render_pautas():
             "data_sessao": "Sessão", "horario": "Hora", "processo": "Processo",
             "relator": "Relator", "superintendencia": "Superintendência",
             "objeto": "Objeto"})
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        tabela(show, datas=["Sessão"], use_container_width=True, hide_index=True)
     else:
         st.info("Nenhuma sessão futura na pauta atual.")
 
@@ -1788,7 +1806,8 @@ def render_pautas():
             "objeto": "Objeto"})
         st.caption("Processos que estavam pautados e saíram da pauta seguinte. "
                    "⚠️ 'sumiu sem julgamento' é o que merece atenção.")
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        tabela(show, datas=["Estava p/ sessão", "Saiu em"],
+               use_container_width=True, hide_index=True)
     else:
         st.success("Nenhum processo tirado de pauta detectado até agora "
                    "(o rastreio começa quando surge a 2ª versão da pauta).")
@@ -1797,7 +1816,7 @@ def render_pautas():
                 "objeto"]].rename(columns={
         "data_sessao": "Sessão", "processo": "Processo", "relator": "Relator",
         "superintendencia": "Superintendência", "objeto": "Objeto"})
-    st.dataframe(show, use_container_width=True, hide_index=True)
+    tabela(show, datas=["Sessão"], use_container_width=True, hide_index=True)
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="pautas_julgamento.csv", mime="text/csv")
 
@@ -1886,17 +1905,16 @@ def dialog_relator(nome, cargo, sigla):
                "= do processo sancionador (ou o ano do nº). Colunas de tempo em **dias** "
                "(clique no cabeçalho para ordenar pelo total de dias).")
     if procs:
-        st.dataframe(pd.DataFrame(procs), use_container_width=True, hide_index=True,
-                     column_config={
-                         "Relator há (dias)": st.column_config.NumberColumn(format="%d dias"),
-                         "Aberto há (dias)": st.column_config.NumberColumn(format="%d dias")})
+        tabela(pd.DataFrame(procs), datas=["Relator desde"],
+               dias=["Relator há (dias)", "Aberto há (dias)"],
+               use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum processo com esta pessoa como relator atual nos informativos.")
     st.markdown("#### 🚫 Impedimentos e suspeições")
     if imped:
         dfi = pd.DataFrame(imped, columns=["Processo", "Tipo", "Assunto",
                                            "Informativo", "Data"])
-        st.dataframe(dfi, use_container_width=True, hide_index=True)
+        tabela(dfi, datas=["Data"], use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum impedimento/suspeição registrado nos informativos.")
 
@@ -2011,8 +2029,8 @@ def render_audiencias():
             "id": "Nº", "data": "Data", "hora": "Hora", "componente": "Componente",
             "assunto": "Assunto", "solicitante_nome": "Solicitante",
             "acompanhantes": "Acompanhantes", "status": "Status", "link": "Link"})
-        event = st.dataframe(
-            show, use_container_width=True, hide_index=True, height=480,
+        event = tabela(
+            show, datas=["Data"], use_container_width=True, hide_index=True, height=480,
             on_select="rerun", selection_mode="single-row",
             column_config={
                 "Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
