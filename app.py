@@ -285,6 +285,22 @@ def julgamentos_do_processo(proc_norm):
             for r in rows]
 
 
+@st.cache_data(ttl=300)
+def _mapa_link_julgamento():
+    """proc_norm -> URL da pagina do julgamento (relatorio/voto/decisao) na CVM,
+    coletada de conteudo.cvm.gov.br/sancionadores para a tabela julgamento_paginas."""
+    if not os.path.exists(JULGAR_DB_PATH):
+        return {}
+    con = sqlite3.connect(JULGAR_DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT proc_norm, link FROM julgamento_paginas").fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    return {pn: lk for pn, lk in rows if pn and lk}
+
+
 def _desfecho_acusado(situacao, historico=""):
     """Rótulo curto do desfecho de mérito a partir da situação/histórico do
     acusado. A situação (status mais recente) tem prioridade; o histórico
@@ -410,15 +426,21 @@ def dialog_processo(row, acus):
                 for _, a in ac.iterrows()] if len(ac) else []
         cont = Counter(d for d in desf if d and d != "—")
         resumo_desf = " · ".join(f"{v} {k.lower()}" for k, v in cont.items()) or "—"
+        lj = _mapa_link_julgamento().get(_norm_proc(row["numero"]), "")
+        link_julg = (
+            f'<p style="font-size:13px"><b>📄 Decisão do julgamento '
+            f'(relatório e voto):</b> <a href="{e(lj)}" target="_blank">'
+            f'abrir no site da CVM ↗</a></p>') if lj else (
+            '<p style="font-size:12px">Inteiro teor (votos e resultado) na pasta '
+            'de Sancionadores — botão <b>“Abrir no site da CVM ↗”</b> acima.</p>')
         julg_html = (
             f'<h3>⚖️ Julgamento ({len(julgs)})</h3>'
             '<p style="font-size:12px">Fonte: planilha oficial "Processos Julgados '
-            'por Relator". O inteiro teor do julgamento (votos e resultado) está na '
-            'pasta de Sancionadores — botão <b>“Abrir no site da CVM ↗”</b> acima.</p>'
+            'por Relator".</p>'
             '<table><tr class="header"><td>Data</td><td>Relator</td><td>Peça</td>'
             f'<td>Rito</td><td>Sup.</td></tr>{jr}</table>'
             f'<p style="font-size:13px"><b>Desfecho (por acusado):</b> '
-            f'{e(resumo_desf)}</p>')
+            f'{e(resumo_desf)}</p>{link_julg}')
     else:
         julg_html = ''
     doc = (
