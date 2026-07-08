@@ -2004,6 +2004,30 @@ def dialog_decisao(row):
                             + (f" [ver ↗]({link})" if link else ""))
 
 
+@st.dialog("Ata do Colegiado", width="large")
+def dialog_ata_colegiado(row):
+    e = _esc
+    st.link_button("Abrir no site da CVM ↗", row["link"])
+    texto = str(row.get("texto") or "").strip()
+    if texto:
+        # quebra visual antes de cada deliberacao (Reg. nº / PROC. / nº do processo)
+        corpo = e(texto)
+        corpo = re.sub(r"(\s)(PROC\.|PROCESSO|Reg\. n)", r"<br><br>\2", corpo)
+        corpo = f'<div style="text-align:justify">{corpo}</div>'
+    else:
+        corpo = ('<p style="font-size:13px">— conteúdo integral ainda não coletado '
+                 'para esta ata (a varredura cobre as reuniões desde 2022). '
+                 'Use o botão acima para abrir no site da CVM. —</p>')
+    doc = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f'<style>{CSS_CVM} #width{{font-size:13px;line-height:1.55}}</style>'
+        '</head><body><div id="width">'
+        f'<h2>{e(row["titulo"])}</h2>'
+        f'<p style="font-size:12px"><b>Data:</b> {e(row["data"])} &nbsp;·&nbsp; '
+        f'<b>Tipo:</b> {e(row["tipo"])}</p>{corpo}</div></body></html>')
+    components.html(doc, height=620, scrolling=True)
+
+
 def render_decisoes():
     st.subheader("⚖️ Decisões do Colegiado + Atas — CVM")
     dec = carregar_decisoes()
@@ -2065,26 +2089,43 @@ def render_decisoes():
         if atc is None or len(atc) == 0:
             st.info("Base de atas do Colegiado ainda não disponível.")
         else:
+            temtxt = "texto" in atc.columns
             c1, c2 = st.columns([2, 1])
-            q = c1.text_input("Buscar (título)", key="at_q")
+            q = c1.text_input(
+                "Buscar (título" + (" e conteúdo da ata" if temtxt else "") + ")",
+                key="at_q")
             anos = sorted({a[:4] for a in atc["data_iso"].dropna() if a}, reverse=True)
             f_ano = c2.multiselect("Ano", anos, key="at_ano")
             m = pd.Series(True, index=atc.index)
             if q.strip():
+                alvo = atc["titulo"].fillna("")
+                if temtxt:
+                    alvo = alvo + " " + atc["texto"].fillna("")
+                alvo = alvo.str.lower()
                 for w in q.lower().split():
-                    m &= atc["titulo"].fillna("").str.lower().str.contains(
-                        re.escape(w), na=False)
+                    m &= alvo.str.contains(re.escape(w), na=False)
             if f_ano:
                 m &= atc["data_iso"].str[:4].isin(f_ano)
             r2 = atc[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
             st.metric("Atas encontradas", f"{len(r2):,}".replace(",", "."))
+            if temtxt:
+                n_txt = int(r2["texto"].fillna("").str.len().gt(0).sum())
+                st.caption("👆 Clique numa linha para ler a ata inteira. Conteúdo "
+                           f"integral em {n_txt} de {len(r2)} (varredura desde 2022).")
             show = r2[["data", "tipo", "titulo", "link"]].rename(columns={
                 "data": "Data", "tipo": "Tipo", "titulo": "Título", "link": "Link"})
-            tabela(show, datas=["Data"], use_container_width=True, hide_index=True,
-                   height=460, column_config={"Link": st.column_config.LinkColumn(
-                       "Link", display_text="abrir ↗")})
+            ev = tabela(show, datas=["Data"], use_container_width=True, hide_index=True,
+                        height=460, on_select="rerun", selection_mode="single-row",
+                        column_config={"Link": st.column_config.LinkColumn(
+                            "Link", display_text="abrir ↗")})
             st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                                file_name="atas_colegiado.csv", mime="text/csv")
+            selr = ev.selection.rows if getattr(ev, "selection", None) else []
+            if selr:
+                lk = r2.iloc[selr[0]]["link"]
+                if lk != st.session_state.get("dlg_ata_col"):
+                    st.session_state["dlg_ata_col"] = lk
+                    dialog_ata_colegiado(r2.iloc[selr[0]])
 
 
 @st.cache_data(ttl=300)
