@@ -7,6 +7,7 @@ import json
 import unicodedata
 import datetime as dt
 from collections import Counter
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -407,8 +408,7 @@ def dialog_processo(row, acus):
         dcr = ""
         for data, data_iso, tipo, ementa, link in decs[:40]:
             la = mata.get(str(data_iso or ""), "")
-            cel_ata = (f'<a href="{e(la)}" target="_blank">ver ata ↗</a>'
-                       if la else "—")
+            cel_ata = _ver_ata_link(la)
             dcr += (f'<tr><td style="white-space:nowrap">{e(data)}</td>'
                     f'<td>{e(tipo)}</td><td>{e(ementa)}</td>'
                     f'<td><a href="{e(link)}" target="_blank">abrir ↗</a></td>'
@@ -428,8 +428,7 @@ def dialog_processo(row, acus):
         for x in julgs:
             d0 = _to_date(x["data"])
             la = mata.get(d0.isoformat(), "") if d0 else ""
-            cel_ata = (f'<a href="{e(la)}" target="_blank">ver ata ↗</a>'
-                       if la else "—")
+            cel_ata = _ver_ata_link(la)
             jr += (f'<tr><td style="white-space:nowrap">{e(x["data"])}</td>'
                    f'<td>{e(x["relator"])}</td><td>{e(x["tipo"])}</td>'
                    f'<td>{e(x["rito"])}</td><td>{e(x["sup"])}</td>'
@@ -1214,8 +1213,10 @@ def dialog_termo(row):
         _mt = _mapa_ata_por_data()
         for data, data_iso, tipo, ementa, link in decs[:15]:
             _la = _mt.get(str(data_iso or ""), "")
-            _ata = f" · [ver ata ↗]({_la})" if _la else ""
-            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link}){_ata}")
+            _ata = (f' · <a href="?ata={quote(_la, safe="")}" target="_blank">'
+                    "ver ata ↗</a>") if _la else ""
+            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link}){_ata}",
+                        unsafe_allow_html=True)
     desp = despachos_do_processo(row["processo"])
     if desp:
         st.markdown(f"#### 🏛️ Despachos/audiências relacionados ({len(desp)})")
@@ -1445,8 +1446,10 @@ def dialog_ns(chave, processo):
         _mt = _mapa_ata_por_data()
         for data, data_iso, tipo, ementa, link in decs[:15]:
             _la = _mt.get(str(data_iso or ""), "")
-            _ata = f" · [ver ata ↗]({_la})" if _la else ""
-            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link}){_ata}")
+            _ata = (f' · <a href="?ata={quote(_la, safe="")}" target="_blank">'
+                    "ver ata ↗</a>") if _la else ""
+            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link}){_ata}",
+                        unsafe_allow_html=True)
     _bloco_noticias_md(pn)
     # links de TODAS as decisões, num bloco
     links = [(r["data"], r["inf_numero"], r["link"]) for _, r in g.iterrows() if r["link"]]
@@ -1968,6 +1971,44 @@ def _mapa_ata_por_data():
         if di and lk and di not in out:
             out[di] = lk
     return out
+
+
+def _ver_ata_link(la):
+    """HTML do 'ver ata' que abre o popup da ata DO NOSSO APP em nova aba
+    (window.top é same-origin no iframe do components.html)."""
+    if not la:
+        return "—"
+    return ("<a href=\"#\" onclick=\"window.open(window.top.location.pathname"
+            "+'?ata='+encodeURIComponent('" + la + "'),'_blank');return false;\" "
+            "style=\"cursor:pointer\">ver ata ↗</a>")
+
+
+def _ata_por_link(link):
+    """Linha (dict) da ata pelo seu link, para abrir o popup por ?ata=."""
+    if not link or not os.path.exists(DECISOES_DB_PATH):
+        return None
+    con = sqlite3.connect(DECISOES_DB_PATH)
+    try:
+        cur = con.execute(
+            "SELECT link,titulo,data,data_iso,tipo,texto,ficha "
+            "FROM atas_colegiado WHERE link=?", (link,))
+        cols = [d[0] for d in cur.description]
+        r = cur.fetchone()
+    except Exception:
+        cols, r = [], None
+    con.close()
+    return dict(zip(cols, r)) if r else None
+
+
+def _abrir_ata_por_query():
+    """Se a URL tiver ?ata=<link>, abre o popup daquela ata (uma vez)."""
+    al = st.query_params.get("ata")
+    if not al or st.session_state.get("_ata_q") == al:
+        return
+    st.session_state["_ata_q"] = al
+    row = _ata_por_link(al)
+    if row is not None:
+        dialog_ata_colegiado(row)
 
 
 @st.cache_data(ttl=600)
@@ -2630,6 +2671,7 @@ SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos S
 def main():
     if not autenticado():
         return
+    _abrir_ata_por_query()   # ?ata=<link> abre o popup da ata dentro do app
     # Navegacao PREGUICOSA: so a secao selecionada e' renderizada (o st.tabs
     # executaria todas as abas a cada carregamento, pesado demais na nuvem).
     if hasattr(st, "segmented_control"):
