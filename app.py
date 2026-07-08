@@ -400,17 +400,22 @@ def dialog_processo(row, acus):
         desp_html = ('<h3>Despachos/audiências relacionados</h3>'
                      '<p style="font-size:13px">— nenhum despacho relacionado —</p>')
     # Decisões do Colegiado (cruzamento por nº do processo)
+    mata = _mapa_ata_por_data()  # data_iso -> link da ata da reuniao
     decs = decisoes_do_processo(_norm_proc(row["numero"]))
     if decs:
-        dcr = "".join(
-            f'<tr><td style="white-space:nowrap">{e(data)}</td><td>{e(tipo)}</td>'
-            f'<td>{e(ementa)}</td>'
-            f'<td><a href="{e(link)}" target="_blank">abrir ↗</a></td></tr>'
-            for data, tipo, ementa, link in decs[:40])
+        dcr = ""
+        for data, data_iso, tipo, ementa, link in decs[:40]:
+            la = mata.get(str(data_iso or ""), "")
+            cel_ata = (f'<a href="{e(la)}" target="_blank">ver ata ↗</a>'
+                       if la else "—")
+            dcr += (f'<tr><td style="white-space:nowrap">{e(data)}</td>'
+                    f'<td>{e(tipo)}</td><td>{e(ementa)}</td>'
+                    f'<td><a href="{e(link)}" target="_blank">abrir ↗</a></td>'
+                    f'<td>{cel_ata}</td></tr>')
         dec_html = (
             f'<h3>Decisões do Colegiado ({len(decs)})</h3>'
             '<table><tr class="header"><td>Data</td><td>Tipo</td>'
-            f'<td>Ementa</td><td>Link</td></tr>{dcr}</table>')
+            f'<td>Ementa</td><td>Decisão</td><td>Ata da reunião</td></tr>{dcr}</table>')
     else:
         dec_html = ('<h3>Decisões do Colegiado</h3>'
                     '<p style="font-size:13px">— nenhuma decisão do Colegiado '
@@ -418,10 +423,16 @@ def dialog_processo(row, acus):
     # ⚖️ Julgamento (planilha oficial de julgados) + desfecho consolidado
     julgs = julgamentos_do_processo(_norm_proc(row["numero"]))
     if julgs:
-        jr = "".join(
-            f'<tr><td style="white-space:nowrap">{e(x["data"])}</td>'
-            f'<td>{e(x["relator"])}</td><td>{e(x["tipo"])}</td>'
-            f'<td>{e(x["rito"])}</td><td>{e(x["sup"])}</td></tr>' for x in julgs)
+        jr = ""
+        for x in julgs:
+            d0 = _to_date(x["data"])
+            la = mata.get(d0.isoformat(), "") if d0 else ""
+            cel_ata = (f'<a href="{e(la)}" target="_blank">ver ata ↗</a>'
+                       if la else "—")
+            jr += (f'<tr><td style="white-space:nowrap">{e(x["data"])}</td>'
+                   f'<td>{e(x["relator"])}</td><td>{e(x["tipo"])}</td>'
+                   f'<td>{e(x["rito"])}</td><td>{e(x["sup"])}</td>'
+                   f'<td>{cel_ata}</td></tr>')
         desf = [_desfecho_acusado(a["situacao"], a["historico"])
                 for _, a in ac.iterrows()] if len(ac) else []
         cont = Counter(d for d in desf if d and d != "—")
@@ -438,7 +449,7 @@ def dialog_processo(row, acus):
             '<p style="font-size:12px">Fonte: planilha oficial "Processos Julgados '
             'por Relator".</p>'
             '<table><tr class="header"><td>Data</td><td>Relator</td><td>Peça</td>'
-            f'<td>Rito</td><td>Sup.</td></tr>{jr}</table>'
+            f'<td>Rito</td><td>Sup.</td><td>Ata</td></tr>{jr}</table>'
             f'<p style="font-size:13px"><b>Desfecho (por acusado):</b> '
             f'{e(resumo_desf)}</p>{link_julg}')
     else:
@@ -1199,8 +1210,11 @@ def dialog_termo(row):
     decs = decisoes_do_processo(pn)
     if decs:
         st.markdown(f"#### 📜 Decisões do Colegiado ({len(decs)})")
-        for data, tipo, ementa, link in decs[:15]:
-            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link})")
+        _mt = _mapa_ata_por_data()
+        for data, data_iso, tipo, ementa, link in decs[:15]:
+            _la = _mt.get(str(data_iso or ""), "")
+            _ata = f" · [ver ata ↗]({_la})" if _la else ""
+            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link}){_ata}")
     desp = despachos_do_processo(row["processo"])
     if desp:
         st.markdown(f"#### 🏛️ Despachos/audiências relacionados ({len(desp)})")
@@ -1427,8 +1441,11 @@ def dialog_ns(chave, processo):
     decs = decisoes_do_processo(pn)
     if decs:
         st.markdown(f"#### 📜 Decisões do Colegiado ({len(decs)})")
-        for data, tipo, ementa, link in decs[:15]:
-            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link})")
+        _mt = _mapa_ata_por_data()
+        for data, data_iso, tipo, ementa, link in decs[:15]:
+            _la = _mt.get(str(data_iso or ""), "")
+            _ata = f" · [ver ata ↗]({_la})" if _la else ""
+            st.markdown(f"- **{data}** ({tipo}): {ementa}  [abrir ↗]({link}){_ata}")
     _bloco_noticias_md(pn)
     # links de TODAS as decisões, num bloco
     links = [(r["data"], r["inf_numero"], r["link"]) for _, r in g.iterrows() if r["link"]]
@@ -1924,18 +1941,32 @@ def carregar_atas_colegiado():
 
 
 def decisoes_do_processo(pn):
-    """Decisões do Colegiado (data, tipo, ementa, link) de um processo."""
+    """Decisões do Colegiado (data, data_iso, tipo, ementa, link) de um processo."""
     if not pn or not os.path.exists(DECISOES_DB_PATH):
         return []
     con = sqlite3.connect(DECISOES_DB_PATH)
     try:
         rows = con.execute(
-            "SELECT data,tipo,ementa,link FROM decisoes WHERE proc_norm=? "
+            "SELECT data,data_iso,tipo,ementa,link FROM decisoes WHERE proc_norm=? "
             "ORDER BY data_iso DESC", (pn,)).fetchall()
     except Exception:
         rows = []
     con.close()
     return rows
+
+
+@st.cache_data(ttl=600)
+def _mapa_ata_por_data():
+    """data_iso -> link da ata da reuniao do Colegiado daquela data."""
+    df = carregar_atas_colegiado()
+    if df is None or "data_iso" not in df.columns:
+        return {}
+    out = {}
+    for _, r in df.iterrows():
+        di, lk = str(r.get("data_iso") or ""), str(r.get("link") or "")
+        if di and lk and di not in out:
+            out[di] = lk
+    return out
 
 
 @st.cache_data(ttl=600)
