@@ -3,6 +3,7 @@
 import os
 import re
 import sqlite3
+import json
 import unicodedata
 import datetime as dt
 from collections import Counter
@@ -2035,28 +2036,76 @@ def dialog_decisao(row):
                             + (f" [ver ↗]({link})" if link else ""))
 
 
+def _ficha_ata_html(row, e):
+    """Bloco HTML da ficha (IA) da ata — resumo, participantes e, por item,
+    posição da área técnica e como cada diretor votou. '' se não houver ficha."""
+    try:
+        f = json.loads(row.get("ficha") or "")
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(f, dict):
+        return ""
+    partes = []
+    if f.get("resumo"):
+        partes.append(f'<p style="font-size:13px"><b>Resumo:</b> '
+                      f'{e(f["resumo"])}</p>')
+    if f.get("participantes"):
+        partes.append(f'<p style="font-size:12px"><b>Participantes:</b> '
+                      f'{e(f["participantes"])}</p>')
+    itens = f.get("itens") or []
+    if itens:
+        partes.append(f'<h3>Itens da reunião ({len(itens)})</h3>')
+    for it in itens:
+        cab = e(it.get("assunto", "")) or "—"
+        proc = e(it.get("processo", ""))
+        rel = e(it.get("relator", ""))
+        meta = " &nbsp;·&nbsp; ".join(x for x in (
+            f"<b>Proc.</b> {proc}" if proc else "",
+            f"<b>Relator:</b> {rel}" if rel else "") if x)
+        partes.append(
+            f'<div style="margin:8px 0 4px 0"><b>{cab}</b>'
+            + (f'<br><span style="font-size:12px">{meta}</span>' if meta else "")
+            + '</div><table>'
+            f'<tr><td class="upperHeader" style="white-space:nowrap">Área técnica</td>'
+            f'<td>{e(it.get("area_tecnica", "—"))}</td></tr>'
+            f'<tr><td class="upperHeader">Decisão</td>'
+            f'<td>{e(it.get("decisao", "—"))}</td></tr>'
+            f'<tr><td class="upperHeader">Como votaram</td>'
+            f'<td>{e(it.get("votos", "—"))}</td></tr></table>')
+    return "".join(partes)
+
+
 @st.dialog("Ata do Colegiado", width="large")
 def dialog_ata_colegiado(row):
     e = _esc
     st.link_button("Abrir no site da CVM ↗", row["link"])
+    ficha_html = _ficha_ata_html(row, e)
     texto = str(row.get("texto") or "").strip()
     if texto:
-        # quebra visual antes de cada deliberacao (Reg. nº / PROC. / nº do processo)
-        corpo = e(texto)
-        corpo = re.sub(r"(\s)(PROC\.|PROCESSO|Reg\. n)", r"<br><br>\2", corpo)
-        corpo = f'<div style="text-align:justify">{corpo}</div>'
+        corpo = re.sub(r"(\s)(PROC\.|PROCESSO|Reg\. n)", r"<br><br>\2", e(texto))
+        # com ficha, a integra fica recolhida num <details>
+        if ficha_html:
+            texto_html = ('<details><summary style="cursor:pointer;font-size:13px">'
+                          '<b>Íntegra da ata</b></summary>'
+                          f'<div style="text-align:justify;margin-top:6px">{corpo}'
+                          '</div></details>')
+        else:
+            texto_html = f'<div style="text-align:justify">{corpo}</div>'
     else:
-        corpo = ('<p style="font-size:13px">— conteúdo integral ainda não coletado '
-                 'para esta ata (a varredura cobre as reuniões desde 2022). '
-                 'Use o botão acima para abrir no site da CVM. —</p>')
+        texto_html = ('<p style="font-size:13px">— conteúdo integral ainda não '
+                      'coletado para esta ata. Use o botão acima. —</p>')
+    if ficha_html:
+        ficha_html = ('<p style="font-size:11px;color:#777">Ficha resumida por IA '
+                      '(área técnica e votos) — confira a íntegra em caso de '
+                      'dúvida.</p>' + ficha_html + '<hr>')
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} #width{{font-size:13px;line-height:1.55}}</style>'
         '</head><body><div id="width">'
         f'<h2>{e(row["titulo"])}</h2>'
         f'<p style="font-size:12px"><b>Data:</b> {e(row["data"])} &nbsp;·&nbsp; '
-        f'<b>Tipo:</b> {e(row["tipo"])}</p>{corpo}</div></body></html>')
-    components.html(doc, height=620, scrolling=True)
+        f'<b>Tipo:</b> {e(row["tipo"])}</p>{ficha_html}{texto_html}</div></body></html>')
+    components.html(doc, height=640, scrolling=True)
 
 
 def render_decisoes():
