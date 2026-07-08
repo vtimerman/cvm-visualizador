@@ -1990,7 +1990,7 @@ def _ata_por_link(link):
     con = sqlite3.connect(DECISOES_DB_PATH)
     try:
         cur = con.execute(
-            "SELECT link,titulo,data,data_iso,tipo,texto,ficha "
+            "SELECT link,titulo,data,data_iso,tipo,texto,ficha,anexos "
             "FROM atas_colegiado WHERE link=?", (link,))
         cols = [d[0] for d in cur.description]
         r = cur.fetchone()
@@ -2139,13 +2139,30 @@ def dialog_ata_colegiado(row):
         ficha_html = ('<p style="font-size:11px;color:#777">Ficha resumida por IA '
                       '(área técnica e votos) — confira a íntegra em caso de '
                       'dúvida.</p>' + ficha_html + '<hr>')
+    # 📎 Anexos: manifestação da área técnica e VOTOS dos diretores (PDFs)
+    try:
+        anx = json.loads(row.get("anexos") or "[]")
+    except (ValueError, TypeError):
+        anx = []
+    if isinstance(anx, list) and anx:
+        li = "".join(
+            f'<li><a href="{e(a.get("link", ""))}" target="_blank">'
+            f'{e(a.get("titulo", "documento"))} ↗</a></li>'
+            for a in anx if a.get("link"))
+        anexos_html = (f'<h3>📎 Votos e relatórios ({len(anx)})</h3>'
+                       '<p style="font-size:12px">Documentos oficiais da reunião '
+                       '(manifestação da área técnica e voto de cada diretor).</p>'
+                       f'<ul style="font-size:13px">{li}</ul><hr>')
+    else:
+        anexos_html = ""
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} #width{{font-size:13px;line-height:1.55}}</style>'
         '</head><body><div id="width">'
         f'<h2>{e(row["titulo"])}</h2>'
         f'<p style="font-size:12px"><b>Data:</b> {e(row["data"])} &nbsp;·&nbsp; '
-        f'<b>Tipo:</b> {e(row["tipo"])}</p>{ficha_html}{texto_html}</div></body></html>')
+        f'<b>Tipo:</b> {e(row["tipo"])}</p>'
+        f'{ficha_html}{anexos_html}{texto_html}</div></body></html>')
     components.html(doc, height=640, scrolling=True)
 
 
