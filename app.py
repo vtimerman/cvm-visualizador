@@ -204,7 +204,7 @@ td { padding:10px; border:1px solid black; vertical-align:top; }
 """
 
 
-def _card(titulo, nome, empresa, cargo):
+def _card_pessoa(titulo, nome, empresa, cargo):
     return (f'<table class="acomp">'
             f'<tr><td colspan="2" class="upperHeader">{titulo}</td></tr>'
             f'<tr><td class="header">Nome</td><td>{nome}</td></tr>'
@@ -219,10 +219,11 @@ def conteudo_detalhe(row):
 
     e = _esc
     acs = [a.strip() for a in str(row["acompanhantes"] or "").split(" | ") if a.strip()]
-    cards = [_card("SOLICITANTE", e(row["solicitante_nome"]),
-                   e(row.get("solicitante_empresa", "")), e(row.get("solicitante_cargo", "")))]
+    cards = [_card_pessoa("SOLICITANTE", e(row["solicitante_nome"]),
+                          e(row.get("solicitante_empresa", "")),
+                          e(row.get("solicitante_cargo", "")))]
     for a in acs:
-        cards.append(_card("ACOMPANHANTE", e(a), "", ""))
+        cards.append(_card_pessoa("ACOMPANHANTE", e(a), "", ""))
 
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
