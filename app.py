@@ -475,6 +475,29 @@ def dialog_processo(row, acus):
             f'<td>Resumo</td><td>Documento</td></tr>{pr}</table>')
     else:
         pubs_html = ''
+    # 🗓️ Pautas de julgamento (Diário/SEI): inclusões e retiradas de pauta.
+    pautas = _mapa_pauta_sei().get(_norm_proc(row["numero"]), [])
+    if pautas:
+        pl = ""
+        for pt in sorted(pautas, key=lambda x: str(x.get("data_sessao_iso") or ""),
+                         reverse=True):
+            sit = str(pt.get("situacao") or "incluido")
+            badge = ("🚫 retirado" if sit.startswith("retirado") else "🗓️ incluído")
+            adv = str(pt.get("advogados") or "")
+            pl += (f'<tr><td style="white-space:nowrap">{e(pt.get("data_sessao",""))}'
+                   f'</td><td>{badge}{" (sine die)" if "sine" in sit else ""}</td>'
+                   f'<td>{e(pt.get("relator",""))}</td>'
+                   f'<td>{e(adv[:120])}</td>'
+                   f'<td><a href="{e(pt.get("link_sei",""))}" target="_blank">'
+                   'abrir ↗</a></td></tr>')
+        pautas_html = (
+            f'<h3>🗓️ Pautas de julgamento (Diário/SEI) ({len(pautas)})</h3>'
+            '<p style="font-size:12px">Inclusões e retiradas de pauta publicadas no '
+            'Diário Eletrônico (fonte oficial das sessões de julgamento).</p>'
+            '<table><tr class="header"><td>Sessão</td><td>Situação</td>'
+            f'<td>Relator</td><td>Advogados</td><td>Documento</td></tr>{pl}</table>')
+    else:
+        pautas_html = ''
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
@@ -486,10 +509,12 @@ def dialog_processo(row, acus):
         '<table><tr class="header"><td>Nome/Razão social</td><td>Desfecho</td>'
         '<td>Situação</td>'
         f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
-        f'{rel_html}{tc_html}{dec_html}{desp_html}{pubs_html}</div></body></html>')
+        f'{rel_html}{tc_html}{dec_html}{desp_html}{pubs_html}{pautas_html}'
+        '</div></body></html>')
     components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
                     + len(decs[:40]) * 30 + len(julgs) * 32
-                    + len(desp[:40]) * 34 + len(pubs[:60]) * 30, scrolling=True)
+                    + len(desp[:40]) * 34 + len(pubs[:60]) * 30
+                    + len(pautas) * 30, scrolling=True)
     nomes_ac = [a["nome"] for _, a in ac.iterrows()] if len(ac) else []
     _bloco_noticias_md(_norm_proc(row["numero"]), nomes=nomes_ac)
 
@@ -1971,6 +1996,34 @@ def carregar_pautas():
 
 
 @st.cache_data(ttl=300)
+def carregar_pauta_sei():
+    """Histórico de pautas publicadas no Diário (SEI): inclusões e retiradas."""
+    if not os.path.exists(PAUTAS_DB_PATH):
+        return None
+    con = sqlite3.connect(PAUTAS_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM pauta_sei ORDER BY data_sessao_iso DESC", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def _mapa_pauta_sei():
+    """proc_norm -> lista de inclusões/retiradas em pauta (Diário/SEI)."""
+    df = carregar_pauta_sei()
+    out = {}
+    if df is None or len(df) == 0:
+        return out
+    for _, r in df.iterrows():
+        pn = str(r.get("proc_norm") or "")
+        if pn:
+            out.setdefault(pn, []).append(r.to_dict())
+    return out
+
+
+@st.cache_data(ttl=300)
 def carregar_decisoes():
     if not os.path.exists(DECISOES_DB_PATH):
         return None
@@ -2448,6 +2501,49 @@ def render_pautas():
     else:
         st.success("Nenhum processo tirado de pauta detectado até agora "
                    "(o rastreio começa quando surge a 2ª versão da pauta).")
+    # --- Pautas publicadas no Diário (SEI): histórico + roteamento ---
+    psei = carregar_pauta_sei()
+    if psei is not None and len(psei):
+        st.divider()
+        st.markdown("#### 📜 Pautas de julgamento publicadas no Diário (SEI)")
+        st.caption(
+            f"Fonte oficial · {len(psei)} inclusões/retiradas de pauta. "
+            "Processos **já julgados** aparecem na aba ✅ Julgados; aqui ficam os "
+            "**pendentes** e os **retirados de pauta**.")
+        p2 = psei.copy()
+        p2["_julg"] = p2["proc_norm"].isin(set_julg)
+        hoje_iso = hoje.isoformat()
+        sit = p2["situacao"].fillna("")
+        is_ret = sit.str.startswith("retirado")
+        passou = ((p2["data_sessao_iso"] != "") &
+                  (p2["data_sessao_iso"] < hoje_iso) & (~p2["_julg"]))
+        cols_sei = {"data_sessao": "Sessão", "processo": "Processo",
+                    "relator": "Relator", "situacao": "Situação", "objeto": "Objeto",
+                    "link_sei": "Documento"}
+        lc = {"Documento": st.column_config.LinkColumn("Documento",
+                                                       display_text="abrir ↗")}
+        # Tirados de pauta (retirada explícita OU sessão passou sem julgamento)
+        tir = p2[(is_ret | passou) & (~p2["_julg"])]
+        st.markdown(f"##### 🚨 Tirados de pauta pelo Diário ({len(tir)})")
+        if len(tir):
+            st.caption("Retirada publicada no Diário ('retirado da pauta', inclusive "
+                       "*sine die*) ou sessão que passou sem o processo ser julgado.")
+            tabela(tir.sort_values("data_sessao_iso", ascending=False)[list(cols_sei)]
+                   .rename(columns=cols_sei), datas=["Sessão"], hide_index=True,
+                   use_container_width=True, column_config=lc)
+        else:
+            st.success("Nenhum retirado de pauta pendente detectado no Diário.")
+        # Pendentes de julgamento (não julgados, sessão futura/sem data)
+        pend = p2[(~p2["_julg"]) & (~is_ret) &
+                  ((p2["data_sessao_iso"] >= hoje_iso) | (p2["data_sessao_iso"] == ""))]
+        st.markdown(f"##### ⏳ Pautados pendentes de julgamento ({len(pend)})")
+        if len(pend):
+            tabela(pend.sort_values("data_sessao_iso", ascending=False)[list(cols_sei)]
+                   .rename(columns=cols_sei), datas=["Sessão"], hide_index=True,
+                   use_container_width=True, column_config=lc)
+        else:
+            st.info("Nenhum processo pautado pendente no momento.")
+
     st.markdown("#### 📋 Pauta atual completa")
     show = pau[["data_sessao", "processo", "relator", "superintendencia",
                 "objeto"]].rename(columns={
