@@ -50,26 +50,56 @@ def mapa_links():
     return m
 
 
-def parse_meta(texto):
-    cab = re.sub(r"\s+", " ", texto[:600])
+def _fmt(d, mo, a):
+    if 1 <= d <= 31 and 1 <= mo <= 12 and 2000 <= a <= 2100:
+        return f"{d:02d}/{mo:02d}/{a}", f"{a}-{mo:02d}-{d:02d}"
+    return "", ""
+
+
+def _data_de(texto, base):
+    """Data da reunião: prioriza 'DATA ... REALIZAÇÃO: DD/MM/AAAA', depois a data
+    no nome do arquivo, depois 'DD de MÊS de AAAA' (evita datas de boilerplate)."""
+    m = re.search(r"REALIZA[ÇC][ÃA]O:?\s*(\d{1,2})/(\d{1,2})/(\d{4})", texto, re.I)
+    if m:
+        r = _fmt(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if r[0]:
+            return r
+    m = re.search(r"(\d{1,2})[-_.](\d{1,2})[-_.](\d{4})", base)  # nome do arquivo
+    if m:
+        r = _fmt(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if r[0]:
+            return r
+    m = re.search(r"(\d{1,2})\s+DE\s+([A-Za-zçÇ]+)\s+DE\s+(\d{4})", texto[:400], re.I)
+    if m:
+        mm = MESES.get(m.group(2).lower().replace("ç", "c"), 0)
+        if mm:
+            r = _fmt(int(m.group(1)), mm, int(m.group(3)))
+            if r[0]:
+                return r
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", texto)  # 1a data dd/mm/aaaa
+    if m:
+        return _fmt(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    return "", ""
+
+
+def parse_meta(texto, base=""):
+    cab = re.sub(r"\s+", " ", texto[:800])
+    up = cab.upper()
     numero = ""
-    m = re.search(r"\((\d+)\s*[ªa]\)", cab)
+    m = re.search(r"(\d+)\s*[ªa]\s*REUNI", up) or re.search(r"\((\d+)\s*[ªa]\)", cab)
     if m:
         numero = m.group(1)
+    elif base:  # nº da ata pelo nome do arquivo (padrões seguros)
+        mb = (re.search(r"__(\d{2,3})__", base) or re.search(r"_(\d{2,3})_", base)
+              or re.search(r"\bata[-_](\d{2,3})\b", base, re.I))
+        if mb:
+            numero = mb.group(1)
     tipo = ""
-    up = cab.upper()
     if "EXTRAORDIN" in up:
         tipo = "Extraordinária"
     elif "ORDIN" in up:
         tipo = "Ordinária"
-    data = data_iso = ""
-    m = re.search(r"(\d{1,2})\s+DE\s+([A-Za-zçÇãÃéÉ]+)\s+DE\s+(\d{4})", cab, re.I)
-    if m:
-        d, mes, a = int(m.group(1)), m.group(2).lower(), int(m.group(3))
-        mm = MESES.get(mes.replace("ç", "c"), MESES.get(mes, 0))
-        if mm:
-            data = f"{d:02d}/{mm:02d}/{a}"
-            data_iso = f"{a}-{mm:02d}-{d:02d}"
+    data, data_iso = _data_de(texto, base)
     # membros: bloco apos "Membros do CGE" ate assinaturas/rodape
     membros = []
     mm = re.search(r"Membros do CGE\s*:?(.*?)(Documento assinado|assinado eletronicamente|$)",
@@ -93,7 +123,7 @@ def construir():
     for txt in sorted(glob.glob(os.path.join(TXT_DIR, "*.txt"))):
         base = os.path.splitext(os.path.basename(txt))[0]
         texto = open(txt, encoding="utf-8").read()
-        numero, tipo, data, data_iso, membros = parse_meta(texto)
+        numero, tipo, data, data_iso, membros = parse_meta(texto, base)
         link = links.get(base, "")
         # preserva a parametrizacao de IA se ja existir
         row = con.execute("SELECT deliberacoes, resumo, palavras_chave, ai_feito "
