@@ -3756,18 +3756,132 @@ def render_enforcement():
         render_prazos()
 
 
+def _dados_ficha_diretor(d):
+    """Junta tudo de um diretor (conduta.db + análises) para a ficha visual."""
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    ev = pd.read_sql("SELECT * FROM eventos WHERE diretor=:d", con,
+                     params={"d": d})
+    pz = pd.read_sql("SELECT * FROM prazos WHERE diretor=:d", con,
+                     params={"d": d})
+    perfil = pd.read_sql("SELECT * FROM julgado_perfil", con)
+    try:
+        dossie = con.execute("SELECT dossie FROM perfis WHERE diretor=?",
+                             (d,)).fetchone()
+    except Exception:
+        dossie = None
+    con.close()
+    ana = {pn: a for (pn, t), a in _mapa_analises().items() if t == "julgado"}
+    return ev, pz, perfil, (json.loads(dossie[0]) if dossie else {}), ana
+
+
+def render_ficha_diretor():
+    st.markdown("#### 🎯 Ficha visual do diretor")
+    if not os.path.exists(CONDUTA_DB_PATH):
+        st.info("Base de conduta ainda não disponível.")
+        return
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    dirs = [r[0] for r in con.execute(
+        "SELECT DISTINCT diretor FROM eventos WHERE diretor<>'(Colegiado)' "
+        "AND diretor<>'' ORDER BY diretor")]
+    con.close()
+    d = st.selectbox("Diretor", dirs, key="fd_dir", index=None,
+                     placeholder="escolha um diretor…")
+    if not d:
+        return
+    ev, pz, perfil, dossie, ana = _dados_ficha_diretor(d)
+    julgs = ev[ev["evento"] == "julgou"].copy()
+    # ---- métricas de cabeçalho -------------------------------------------
+    pj = pz[pz["situacao"] == "julgado"].dropna(subset=["dias"])
+    est = pz[pz["situacao"] == "em estoque"]
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("⚖️ Julgou", len(julgs))
+    c2.metric("💰 Multas (R$ mi)", f"{julgs['valor'].sum() / 1e6:,.1f}"
+              .replace(",", "."))
+    c3.metric("⏱️ Prazo médio (dias)*",
+              int(pj["dias"].mean()) if len(pj) else "—")
+    c4.metric("📥 Estoque atual", len(est))
+    c5.metric("🕰️ Idade média do estoque",
+              f"{int(est['dias'].mean())} d" if len(est) else "—")
+    st.caption("*Prazo = sorteio da relatoria (informativos) → julgamento, "
+               f"nos {len(pj)} casos com as duas datas.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🗳️ Votos vencidos", int((ev["evento"] == "voto_vencido").sum()))
+    c2.metric("👁️ Pedidos de vista", int((ev["evento"] == "pediu_vista").sum()))
+    c3.metric("🚫 Retiradas de pauta",
+              int((ev["evento"] == "retirou_de_pauta").sum()))
+    c4.metric("⛔ Impedimentos", int((ev["evento"] == "impedimento").sum()))
+    st.divider()
+    # ---- quem ele julga (parametrização por réu) + severidade -------------
+    cA, cB = st.columns(2)
+    with cA:
+        st.markdown("**Quem é julgado por ele(a):**")
+        jp = julgs.merge(perfil, on="proc_norm", how="left")
+        tot = {"Pessoas físicas": jp["n_pf"].fillna(0).sum(),
+               "Empresas": jp["n_empresa"].fillna(0).sum(),
+               "Instituições financeiras": jp["n_financeira"].fillna(0).sum()}
+        st.bar_chart(pd.Series(tot), horizontal=True)
+        # multa média por classe dominante do processo
+        def _cls(r):
+            if (r.get("n_financeira") or 0) > 0:
+                return "c/ instituição financeira"
+            if (r.get("n_empresa") or 0) > 0:
+                return "c/ empresa"
+            return "só pessoas físicas"
+        if len(jp):
+            jp["classe"] = jp.apply(_cls, axis=1)
+            med = jp.groupby("classe")["valor"].mean() / 1e3
+            st.markdown("**Multa média por tipo de réu (R$ mil):**")
+            st.bar_chart(med, horizontal=True)
+    with cB:
+        st.markdown("**Severidade das decisões (análises IA):**")
+        sev = pd.Series([str((ana.get(pn) or {}).get("severidade") or "?")
+                         for pn in julgs["proc_norm"]]).value_counts()
+        st.bar_chart(sev, horizontal=True)
+        st.markdown("**Julgamentos por ano:**")
+        anos = julgs["data_iso"].str[:4].value_counts().sort_index()
+        st.bar_chart(anos)
+    # ---- estoque: o que deixou de pautar ----------------------------------
+    if len(est):
+        st.markdown(f"**📥 Estoque sem julgamento ({len(est)}) — o que ainda "
+                    "não pautou:**")
+        st.dataframe(est.sort_values("dias", ascending=False)[
+            ["proc_norm", "recebido_iso", "dias"]].rename(columns={
+                "proc_norm": "Processo", "recebido_iso": "Recebido em",
+                "dias": "Dias parado"}),
+            use_container_width=True, hide_index=True, height=220)
+    # ---- dossiê ------------------------------------------------------------
+    if dossie:
+        st.divider()
+        st.markdown("**🤖 Dossiê (IA):**")
+        for rot, campo in [("Perfil", "perfil_resumido"),
+                           ("Padrão decisório", "padrao_decisorio"),
+                           ("Dosimetria", "severidade_dosimetria"),
+                           ("Perfil dos réus", "perfil_dos_reus"),
+                           ("Incoerências detectadas", "incoerencias"),
+                           ("Prazos e pautas", "prazos_e_pautas")]:
+            v = dossie.get(campo)
+            if isinstance(v, list):
+                v = " · ".join(str(x) for x in v)
+            if v and str(v).strip() not in ("", "-"):
+                st.markdown(f"- **{rot}:** {v}")
+        sp = str(dossie.get("system_prompt") or "").strip()
+        if sp:
+            with st.expander("🤖 System prompt do agente (copiar)"):
+                st.code(sp, language=None)
+
+
 def render_colegiado():
     st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
-    st.caption("Decisões e atas trazem também o **🗳️ Perfil de votação** — "
-               "conduta por diretor e dossiês (base dos agentes).")
     visao = st.segmented_control(
-        "Seção", ["📜 Decisões, Atas e Votos", "📰 Informativos",
-                  "👥 Quem é Quem", "📋 Atas do CGE"],
+        "Seção", ["📜 Decisões, Atas e Votos", "🎯 Ficha do diretor",
+                  "📰 Informativos", "👥 Quem é Quem", "📋 Atas do CGE"],
         key="col_nav", default="📜 Decisões, Atas e Votos",
         label_visibility="collapsed")
     st.divider()
     if visao == "📜 Decisões, Atas e Votos":
         render_decisoes()
+    elif visao == "🎯 Ficha do diretor":
+        render_ficha_diretor()
     elif visao == "📰 Informativos":
         render_informativos()
     elif visao == "👥 Quem é Quem":

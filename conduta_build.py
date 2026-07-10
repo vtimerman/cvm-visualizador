@@ -34,6 +34,22 @@ DIRETORES = ["Otto Lobo", "Joao Accioly", "Marina Copola", "Joao Pedro Nasciment
 SIGLAS = {"DJA": "Joao Accioly", "DMC": "Marina Copola", "DOL": "Otto Lobo",
           "DFP": "Flavia Perlingeiro", "DAR": "Alexandre Rangel",
           "DDM": "Daniel Maeda", "DIM": "Igor Muniz", "TPC": "Thiago Paiva Chaves"}
+
+# classes de acusado (heuristica textual sobre o nome/razao social)
+RE_FIN = re.compile(r"BANCO|CORRETORA|DTVM|CCTVM|DISTRIBUIDORA DE T|ASSET|"
+                    r"GESTORA|GESTAO DE RECURSOS|ADMINISTRADORA DE CARTEIRA|"
+                    r"SECURITIZADORA|FUNDO DE INVEST|CAPITAL|INVESTIMENTOS")
+RE_PJ = re.compile(r"\bS[./]A\b|\bS/A\b|\bLTDA\b|\bEIRELI\b|PARTICIPACOES|"
+                   r"PARTICIPAÇÕES|COMPANHIA|\bCIA\b|HOLDING|EMPREENDIMENTOS")
+
+
+def classe_acusado(nome):
+    up = _key(nome)
+    if RE_FIN.search(up):
+        return "instituicao_financeira"
+    if RE_PJ.search(up):
+        return "empresa"
+    return "pessoa_fisica"
 # presidencia por periodo (para resolver itens com relator 'PTE')
 PRES = [("Marcelo Barbosa", "", "2021-07-31"),
         ("Joao Pedro Nascimento", "2021-08-01", "2025-07-31"),
@@ -92,6 +108,12 @@ def conectar():
         atualizado_em TEXT)""")
     con.execute("CREATE INDEX IF NOT EXISTS ix_ev_dir ON eventos(diretor)")
     con.execute("CREATE INDEX IF NOT EXISTS ix_ev_proc ON eventos(proc_norm)")
+    con.execute("""CREATE TABLE IF NOT EXISTS julgado_perfil(
+        proc_norm TEXT PRIMARY KEY, n_acusados INTEGER, n_pf INTEGER,
+        n_empresa INTEGER, n_financeira INTEGER, classes TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS prazos(
+        diretor TEXT, proc_norm TEXT, recebido_iso TEXT, julgado_iso TEXT,
+        dias INTEGER, situacao TEXT, PRIMARY KEY (diretor, proc_norm))""")
     con.commit()
     return con
 
@@ -208,6 +230,94 @@ def build():
     except sqlite3.OperationalError:
         pass
     pa.close()
+
+    # ---- D) perfil de quem e julgado (classes de acusado por processo) ----
+    con.execute("DELETE FROM julgado_perfil")
+    p = sqlite3.connect(os.path.join(DIR, "processos.db"))
+    pn_idp = {}
+    for idp, num in p.execute("SELECT idproc, numero FROM processos"):
+        m = re.search(r"1\d{4}\.\d{6}/\d{4}-\d{2}", str(num or ""))
+        if m:
+            pn_idp.setdefault(m.group(0), idp)
+    ac_por_idp = {}
+    for idp, nome in p.execute("SELECT idproc, nome FROM acusados"):
+        ac_por_idp.setdefault(idp, []).append(classe_acusado(nome))
+    p.close()
+    for pn, idp in pn_idp.items():
+        cls = ac_por_idp.get(idp, [])
+        if cls:
+            con.execute(
+                "INSERT OR REPLACE INTO julgado_perfil VALUES(?,?,?,?,?,?)",
+                (pn, len(cls), cls.count("pessoa_fisica"), cls.count("empresa"),
+                 cls.count("instituicao_financeira"), ",".join(sorted(set(cls)))))
+    print(f"[conduta] perfil de acusados: {len(pn_idp)} processos")
+
+    # ---- E) relatorias (sorteios) e impedimentos dos informativos ----------
+    inf = sqlite3.connect(os.path.join(DIR, "informativos.db"))
+    receb = {}   # (diretor, proc) -> primeira data de sorteio/redistribuicao
+    for pn, sig, ev, di in inf.execute(
+            "SELECT proc_norm, relator, evento, data_iso FROM relatores "
+            "WHERE data_iso<>''"):
+        d = SIGLAS.get(sig) or (pte_em(di) if sig == "PTE" else "")
+        if not d or not pn:
+            continue
+        if "sorteio" in (ev or "").lower():
+            k = (d, pn)
+            if k not in receb or di < receb[k]:
+                receb[k] = di
+    for (d, pn), di in receb.items():
+        con.execute(ins, (d, "relator", "recebeu_relatoria", pn, pn, di, 0,
+                          "sorteio/redistribuicao", "informativos"))
+    vistos_imp = set()
+    for pn, sig, di in inf.execute(
+            "SELECT proc_norm, sigla, data_iso FROM impedimentos"):
+        d = SIGLAS.get(sig) or (pte_em(di or "") if sig == "PTE" else "")
+        if d and pn and (d, pn) not in vistos_imp:
+            vistos_imp.add((d, pn))
+            con.execute(ins, (d, "votante", "impedimento", pn, pn, di or "", 0,
+                              "declarou-se impedido", "informativos"))
+    inf.close()
+    print(f"[conduta] relatorias recebidas: {len(receb)} | "
+          f"impedimentos: {len(vistos_imp)}")
+
+    # ---- F) prazos: recebido -> julgado; e estoque sem julgamento ----------
+    con.execute("DELETE FROM prazos")
+    j2 = sqlite3.connect(os.path.join(DIR, "julgar.db"))
+    julg_data = {}
+    for rel, pn, data in j2.execute(
+            "SELECT relator_nome, proc_norm, data_julg FROM julgados"):
+        d = canon(rel)
+        m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(data or ""))
+        if d and pn and m:
+            julg_data[(d, pn)] = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    hoje = dt.date.today()
+    for (d, pn), ji in julg_data.items():
+        ri = receb.get((d, pn), "")
+        dias = None
+        if ri:
+            try:
+                dias = (dt.date.fromisoformat(ji) - dt.date.fromisoformat(ri)).days
+            except ValueError:
+                dias = None
+        con.execute("INSERT OR REPLACE INTO prazos VALUES(?,?,?,?,?,?)",
+                    (d, pn, ri, ji, dias, "julgado"))
+    n_est = 0
+    for rel, pn, dtin in j2.execute(
+            "SELECT relator_nome, proc_norm, dt_inicio FROM a_julgar"):
+        d = canon(rel)
+        m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(dtin or ""))
+        if not (d and pn and m):
+            continue
+        ri = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+        try:
+            dias = (hoje - dt.date.fromisoformat(ri)).days
+        except ValueError:
+            continue
+        con.execute("INSERT OR REPLACE INTO prazos VALUES(?,?,?,?,?,?)",
+                    (d, pn, ri, "", dias, "em estoque"))
+        n_est += 1
+    j2.close()
+    print(f"[conduta] prazos: {len(julg_data)} julgados | {n_est} em estoque")
 
     con.commit()
     tot = con.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]
