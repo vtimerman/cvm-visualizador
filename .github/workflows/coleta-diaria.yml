@@ -36,7 +36,6 @@ jobs:
           python atas_colegiado_texto.py
           python boletim_pessoal_baixar.py atualizar
           python boletim_pessoal_extrair.py viagens
-          python informativos_baixar.py
           python scraper.py revisar
           true
       - name: Commit, push e alerta
