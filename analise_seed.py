@@ -166,7 +166,9 @@ def aplicar_ia(caminho):
     n = 0
     for chave, a in dados.items():
         pn, _, tipo = chave.partition("|")
-        pn = _norm(pn)
+        # a chave vem do nosso proprio export (proc_norm da base de origem);
+        # TCs antigos usam formatos nao-SEI ("01/2009", "RJ2013/...") — aceitar.
+        pn = pn.strip()
         if not pn or tipo not in ("julgado", "tc"):
             print(f"  ! chave invalida: {chave}", file=sys.stderr)
             continue
