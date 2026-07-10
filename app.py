@@ -456,6 +456,25 @@ def dialog_processo(row, acus):
             f'{e(resumo_desf)}</p>{link_julg}')
     else:
         julg_html = ''
+    # 📑 Publicações no Diário Eletrônico (SEI): intimações, editais, despachos,
+    # extratos de julgamento/termo/ata ligados a este processo.
+    pubs = _pubs_do_processo(row["numero"])
+    if pubs:
+        pr = ""
+        for p in pubs[:60]:
+            res_p = (p["resumo"] or "")[:200]
+            pr += (f'<tr><td style="white-space:nowrap">{e(p["data"])}</td>'
+                   f'<td>{e(p["tipo"])}</td><td>{e(p["unidade"])}</td>'
+                   f'<td>{e(res_p)}</td>'
+                   f'<td><a href="{e(p["link"])}" target="_blank">abrir ↗</a></td></tr>')
+        pubs_html = (
+            f'<h3>📑 Publicações no Diário (SEI) ({len(pubs)})</h3>'
+            '<p style="font-size:12px">Intimações, editais, despachos e extratos '
+            'publicados no Diário Eletrônico da CVM para este processo.</p>'
+            '<table><tr class="header"><td>Data</td><td>Tipo</td><td>Unidade</td>'
+            f'<td>Resumo</td><td>Documento</td></tr>{pr}</table>')
+    else:
+        pubs_html = ''
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
@@ -467,10 +486,10 @@ def dialog_processo(row, acus):
         '<table><tr class="header"><td>Nome/Razão social</td><td>Desfecho</td>'
         '<td>Situação</td>'
         f'<td>Data</td><td>Histórico de situações</td></tr>{ac_rows}</table>'
-        f'{rel_html}{tc_html}{dec_html}{desp_html}</div></body></html>')
+        f'{rel_html}{tc_html}{dec_html}{desp_html}{pubs_html}</div></body></html>')
     components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
                     + len(decs[:40]) * 30 + len(julgs) * 32
-                    + len(desp[:40]) * 34, scrolling=True)
+                    + len(desp[:40]) * 34 + len(pubs[:60]) * 30, scrolling=True)
     nomes_ac = [a["nome"] for _, a in ac.iterrows()] if len(ac) else []
     _bloco_noticias_md(_norm_proc(row["numero"]), nomes=nomes_ac)
 
@@ -515,8 +534,18 @@ def dialog_julgado_simples(row):
              f"**Peça:** {row.get('tipo', '—')}  ·  "
              f"**Rito:** {row.get('rito', '—')}  ·  "
              f"**Sup.:** {row.get('sup', '—')}")
-    st.info("Este processo não está na base de Sancionadores coletada — a ficha "
-            "completa (objeto, acusados, desfecho e links) ainda não está disponível.")
+    pubs = _pubs_do_processo(row.get("proc_norm") or row.get("processo", ""))
+    if pubs:
+        st.markdown(f"**📑 Publicações no Diário (SEI) ({len(pubs)}):**")
+        tp = pd.DataFrame([{"Data": p["data"], "Tipo": p["tipo"],
+                            "Unidade": p["unidade"], "Resumo": (p["resumo"] or "")[:200],
+                            "Link": p["link"]} for p in pubs[:60]])
+        tabela(tp, datas=["Data"], use_container_width=True, hide_index=True,
+               column_config={"Link": st.column_config.LinkColumn(
+                   "Link", display_text="abrir ↗")})
+    else:
+        st.info("Este processo não está na base de Sancionadores coletada — a ficha "
+                "completa (objeto, acusados, desfecho e links) ainda não está disponível.")
 
 
 def render_julgados_lista():
@@ -581,8 +610,18 @@ def render_julgados_lista():
     dmap = _mapa_desfecho()  # proc_norm -> resumo do desfecho por acusado
     res["Desfecho"] = res["proc_norm"].map(lambda pn: dmap.get(pn, "")) \
         if "proc_norm" in res.columns else ""
+
+    def _extrato_julg(pn):
+        """Link do 'Extrato de Sessão de Julgamento' publicado no Diário (SEI)."""
+        pubs = _mapa_pubs_por_processo().get(pn, [])
+        for p in pubs:
+            if "extrato de sess" in p["tipo"].lower():
+                return p["link"]
+        return ""
+    res["Extrato (SEI)"] = res["proc_norm"].map(_extrato_julg) \
+        if "proc_norm" in res.columns else ""
     cols = ["data_julg", "relator_nome", "processo", "tipo", "rito", "sup",
-            "Desfecho", "Colegiado atual"]
+            "Desfecho", "Extrato (SEI)", "Colegiado atual"]
     show = res[[c for c in cols if c in res.columns]].rename(columns={
         "data_julg": "Julgado em", "relator_nome": "Relator (julgamento)",
         "processo": "Processo", "tipo": "Tipo", "rito": "Rito",
@@ -591,7 +630,9 @@ def render_julgados_lista():
                "por acusado, objeto/ementa, acusados, e links para a pasta de "
                "Sancionadores e o julgamento.")
     ev = tabela(show, datas=["Julgado em"], use_container_width=True, hide_index=True,
-                height=460, on_select="rerun", selection_mode="single-row")
+                height=460, on_select="rerun", selection_mode="single-row",
+                column_config={"Extrato (SEI)": st.column_config.LinkColumn(
+                    "Extrato (SEI)", display_text="abrir ↗")})
     st.download_button(
         "⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
         file_name="processos_julgados_cvm.csv", mime="text/csv")
@@ -1227,6 +1268,15 @@ def dialog_termo(row):
             st.markdown(f"- **{d['data']}** · {d['componente']} · "
                         f"{d['solicitante']} — {d['assunto']}  "
                         f"[abrir ↗]({d['link']})")
+    pubs = _pubs_do_processo(row["processo"])
+    if pubs:
+        st.markdown(f"#### 📑 Publicações no Diário (SEI) ({len(pubs)})")
+        st.caption("Inclui o Extrato de Termo de Compromisso e demais atos "
+                   "publicados no Diário Eletrônico da CVM para este processo.")
+        for p in pubs[:30]:
+            _res = f" — {p['resumo'][:160]}" if str(p["resumo"]).strip() else ""
+            st.markdown(f"- **{p['data']}** · {p['tipo']} ({p['unidade']})"
+                        f"{_res}  [abrir ↗]({p['link']})")
     _bloco_noticias_md(pn, nomes=_nomes_partes(row["partes"]))
 
 
@@ -2102,9 +2152,17 @@ def _ficha_ata_html(row, e):
         cab = e(it.get("assunto", "")) or "—"
         proc = e(it.get("processo", ""))
         rel = e(it.get("relator", ""))
+        # Link do extrato no Diário (SEI) para o processo do item, se houver.
+        lk_pub = ""
+        for p in _pubs_do_processo(it.get("processo", "")):
+            if "extrato de ata" in p["tipo"].lower():
+                lk_pub = p["link"]
+                break
         meta = " &nbsp;·&nbsp; ".join(x for x in (
             f"<b>Proc.</b> {proc}" if proc else "",
-            f"<b>Relator:</b> {rel}" if rel else "") if x)
+            f"<b>Relator:</b> {rel}" if rel else "",
+            (f'<a href="{e(lk_pub)}" target="_blank">Extrato no Diário (SEI) ↗</a>'
+             if lk_pub else "")) if x)
         partes.append(
             f'<div style="margin:8px 0 4px 0"><b>{cab}</b>'
             + (f'<br><span style="font-size:12px">{meta}</span>' if meta else "")
@@ -2689,6 +2747,47 @@ def carregar_publicacoes():
         df = None
     con.close()
     return df
+
+
+def _pub_tipo(descricao):
+    """Tipo da publicação = descrição sem o número final (ex.: 'Intimação 12')."""
+    return re.sub(r"\s*\d+\s*$", "", str(descricao or "")).strip()
+
+
+_RE_PROC_SEI = re.compile(r"1\d{4}\.\d{6}/\d{4}-\d{2}")
+
+
+@st.cache_data(ttl=300)
+def _mapa_pubs_por_processo():
+    """proc_norm -> lista de publicações (Diário Eletrônico/SEI) daquele processo.
+
+    Casa pelo número SEI completo (19957.xxxxxx/aaaa-dd) citado na descrição ou no
+    resumo da publicação. 1037/1544 publicações trazem número de processo.
+    """
+    df = carregar_publicacoes()
+    out = {}
+    if df is None or len(df) == 0:
+        return out
+    for _, r in df.iterrows():
+        blob = f"{r.get('descricao', '') or ''} {r.get('resumo', '') or ''}"
+        for pn in {m.group(0).upper() for m in _RE_PROC_SEI.finditer(blob)}:
+            out.setdefault(pn, []).append({
+                "data": r.get("data", "") or "",
+                "data_iso": r.get("data_iso", "") or "",
+                "tipo": _pub_tipo(r.get("descricao", "")),
+                "descricao": r.get("descricao", "") or "",
+                "resumo": r.get("resumo", "") or "",
+                "unidade": r.get("unidade", "") or "",
+                "link": r.get("link", "") or "",
+            })
+    for pn in out:
+        out[pn].sort(key=lambda x: x["data_iso"], reverse=True)
+    return out
+
+
+def _pubs_do_processo(numero):
+    """Atalho: publicações SEI de um processo, dado o número (qualquer formato)."""
+    return _mapa_pubs_por_processo().get(_norm_proc(numero), [])
 
 
 def render_publicacoes():
