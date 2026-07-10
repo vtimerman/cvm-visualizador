@@ -287,16 +287,24 @@ def cmd_atualizar():
         id_ += 1
         time.sleep(PAUSA)
 
-    # Notifica cada nova audiência (com trava anti-spam para cargas grandes)
-    limite = int(os.environ.get("MAX_NOTIF", "25"))
+    # Notifica UMA vez por rodada (resumo) — evita estourar o limite do CallMeBot.
+    limite = int(os.environ.get("MAX_NOTIF", "40"))
     if 0 < len(novos) <= limite:
-        for nid in novos:
+        if len(novos) == 1:
             r = con.execute("SELECT data, hora, componente, assunto FROM audiencias "
-                            "WHERE id=?", (nid,)).fetchone()
-            msg = (f"Nova audiencia CVM no {nid}\n"
-                   f"{r[0]} {r[1]} - {r[2]}\n"
-                   f"Assunto: {r[3]}\n{BASE}{nid}")
-            notificar_whatsapp(msg)
+                            "WHERE id=?", (novos[0],)).fetchone()
+            msg = (f"Nova audiencia CVM no {novos[0]}: {r[0]} {r[1]} - {r[2]}. "
+                   f"Assunto: {r[3]}. {BASE}{novos[0]}")
+        else:
+            amostra = []
+            for nid in novos[:4]:
+                r = con.execute("SELECT componente, assunto FROM audiencias "
+                                "WHERE id=?", (nid,)).fetchone()
+                amostra.append(f"{nid} {r[0]} ({str(r[1])[:35]})")
+            extra = f" +{len(novos) - 4}" if len(novos) > 4 else ""
+            msg = (f"{len(novos)} novas audiencias particulares na CVM: "
+                   + "; ".join(amostra) + extra + ". Ver no visualizador.")
+        notificar_whatsapp(msg)
     elif len(novos) > limite:
         print(f"[atualizar] {len(novos)} novos (muitos) — notificacao suprimida "
               f"(provavel carga inicial).")
