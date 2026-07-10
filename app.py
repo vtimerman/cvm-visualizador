@@ -2623,6 +2623,19 @@ def render_pautas():
                    column_config=lc)
         else:
             st.info("Nenhum processo pautado pendente no momento.")
+        # Advogados que atuam nas sessões (extraído das pautas do Diário)
+        adv = _advogados_pautas()
+        if adv is not None and len(adv):
+            with st.expander(f"⚖️ Advogados nas sessões de julgamento "
+                             f"({adv['Advogado'].nunique()})"):
+                rk = (adv.groupby(["Advogado", "OAB"]).size()
+                      .rename("Processos").reset_index()
+                      .sort_values("Processos", ascending=False))
+                st.markdown("**Ranking (mais atuantes):**")
+                st.dataframe(rk.head(25), use_container_width=True, hide_index=True)
+                st.markdown("**Por processo:**")
+                st.dataframe(adv.sort_values("Sessão", ascending=False),
+                             use_container_width=True, hide_index=True, height=300)
 
     st.markdown("#### 📋 Pauta atual completa")
     show = pau[["data_sessao", "processo", "relator", "superintendencia",
@@ -2851,6 +2864,51 @@ def render_quem():
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="quem_e_quem_cvm.csv", mime="text/csv")
 
+    # Cruzamento com o Boletim de Pessoal: movimentações e viagens da pessoa.
+    st.divider()
+    with st.expander("📋 Cruzar com o Boletim de Pessoal (movimentações e viagens)"):
+        nome_sel = st.selectbox("Pessoa", sorted(df["nome"].dropna().unique()),
+                                key="qq_bp_nome", index=None,
+                                placeholder="escolha alguém do organograma…")
+        if nome_sel:
+            k = _ent_key(nome_sel)
+            if os.path.exists(PESSOAL_DB_PATH):
+                con = sqlite3.connect(PESSOAL_DB_PATH)
+                try:
+                    vg = pd.read_sql(
+                        "SELECT * FROM viagens WHERE servidor_key=:k", con,
+                        params={"k": k})
+                    bols = pd.read_sql(
+                        "SELECT numero, data, data_iso, pdf_url FROM boletins "
+                        "WHERE texto LIKE :n ORDER BY data_iso DESC LIMIT 60",
+                        con, params={"n": f"%{nome_sel}%"})
+                except Exception:
+                    vg, bols = pd.DataFrame(), pd.DataFrame()
+                con.close()
+                if len(vg):
+                    st.markdown(f"**✈️ Viagens ({len(vg)}):**")
+                    st.dataframe(
+                        vg[["boletim_data_iso", "tipo", "origem", "destino",
+                            "periodo_ini", "periodo_fim", "valor_diarias",
+                            "motivo"]].rename(columns={
+                                "boletim_data_iso": "Boletim", "tipo": "Tipo",
+                                "origem": "Origem", "destino": "Destino",
+                                "periodo_ini": "Início", "periodo_fim": "Fim",
+                                "valor_diarias": "Diárias (R$)", "motivo": "Motivo"})
+                        .sort_values("Boletim", ascending=False),
+                        use_container_width=True, hide_index=True)
+                if len(bols):
+                    st.markdown(f"**📋 Citado em {len(bols)} boletins de pessoal** "
+                                "(nomeações, designações, afastamentos…):")
+                    st.dataframe(bols.rename(columns={
+                        "numero": "Boletim", "data": "Data",
+                        "pdf_url": "PDF"})[["Boletim", "Data", "PDF"]],
+                        use_container_width=True, hide_index=True,
+                        column_config={"PDF": st.column_config.LinkColumn(
+                            "PDF", display_text="abrir ↗")})
+                if not len(vg) and not len(bols):
+                    st.info("Nenhuma menção no Boletim de Pessoal (2000–hoje).")
+
 
 def render_audiencias():
     if not os.path.exists(DB_PATH):
@@ -3078,6 +3136,28 @@ def render_servidores():
             "Boletim (PDF)", display_text="abrir ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="viagens_servidores_cvm.csv", mime="text/csv")
+
+
+# --------------------------------------------------------------------------
+# Advogados nas pautas (Diário/SEI)
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=600)
+def _advogados_pautas():
+    """Pares (advogado, OAB) por processo, a partir do bloco Acusados/Advogados
+    das pautas do Diário. Retorna DataFrame [Advogado, OAB, Processo, Sessão]."""
+    df = carregar_pauta_sei()
+    out = []
+    if df is None or not len(df):
+        return pd.DataFrame()
+    for _, r in df.iterrows():
+        segs = [s.strip() for s in str(r.get("acusados") or "").split("|")]
+        for i, s in enumerate(segs[:-1]):
+            m = re.match(r"OAB/([A-Z]{2})\s*n?[ºo\.]?\s*([\d.]+)", segs[i + 1])
+            if m and s and not s.upper().startswith(("OAB", "ADVOGADO", "ACUSADO")):
+                out.append({"Advogado": s, "OAB": f"OAB/{m.group(1)} {m.group(2)}",
+                            "Processo": r.get("processo", ""),
+                            "Sessão": r.get("data_sessao", "")})
+    return pd.DataFrame(out).drop_duplicates()
 
 
 # --------------------------------------------------------------------------
