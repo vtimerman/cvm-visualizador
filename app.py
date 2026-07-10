@@ -27,6 +27,7 @@ QUEM_DB_PATH = os.environ.get("QUEM_DB_PATH", os.path.join(os.path.dirname(os.pa
 PAUTAS_DB_PATH = os.environ.get("PAUTAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pautas.db"))
 NOTICIAS_DB_PATH = os.environ.get("NOTICIAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "noticias.db"))
 DECISOES_DB_PATH = os.environ.get("DECISOES_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "decisoes.db"))
+PUBLICACOES_DB_PATH = os.environ.get("PUBLICACOES_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "publicacoes.db"))
 
 st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
@@ -2677,13 +2678,73 @@ def render_audiencias():
             st.info("Sem datas para exibir no panorama com os filtros atuais.")
 
 
+@st.cache_data(ttl=300)
+def carregar_publicacoes():
+    if not os.path.exists(PUBLICACOES_DB_PATH):
+        return None
+    con = sqlite3.connect(PUBLICACOES_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM publicacoes", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+def render_publicacoes():
+    st.subheader("📑 Publicações Eletrônicas (SEI) — CVM")
+    df = carregar_publicacoes()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base de Publicações Eletrônicas (Diário Eletrônico da CVM) "
+                "ainda está sendo coletada.")
+        return
+    df = df.copy()
+    df["_tipo"] = (df["descricao"].fillna("")
+                   .str.replace(r"\s*\d+\s*$", "", regex=True).str.strip())
+    st.caption(f"{len(df):,} publicações do Diário Eletrônico da CVM (SEI). "
+               "Fonte: sei.cvm.gov.br/publicacoes.".replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2 = st.columns([2, 1])
+        q = c1.text_input("Buscar (descrição, protocolo, unidade, resumo)", key="pub_q")
+        anos = sorted({a[:4] for a in df["data_iso"].dropna() if a}, reverse=True)
+        f_ano = c2.multiselect("Ano", anos, key="pub_ano")
+        c3, c4 = st.columns(2)
+        tipos = sorted(t for t in df["_tipo"].dropna().unique() if t)
+        f_tipo = c3.multiselect("Tipo de publicação", tipos, key="pub_tipo")
+        uns = sorted(u for u in df["unidade"].dropna().unique() if u)
+        f_un = c4.multiselect("Unidade", uns, key="pub_un")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        col = (df["descricao"].fillna("") + " " + df["protocolo"].fillna("") + " "
+               + df["unidade"].fillna("") + " " + df["resumo"].fillna("")).str.lower()
+        for w in q.lower().split():
+            m &= col.str.contains(re.escape(w), na=False)
+    if f_ano:
+        m &= df["data_iso"].str[:4].isin(f_ano)
+    if f_tipo:
+        m &= df["_tipo"].isin(f_tipo)
+    if f_un:
+        m &= df["unidade"].isin(f_un)
+    res = df[m].sort_values("data_iso", ascending=False).reset_index(drop=True)
+    st.metric("Publicações encontradas", f"{len(res):,}".replace(",", "."))
+    show = res[["data", "descricao", "unidade", "orgao", "veiculo", "link"]].rename(
+        columns={"data": "Data", "descricao": "Descrição", "unidade": "Unidade",
+                 "orgao": "Órgão", "veiculo": "Veículo", "link": "Link"})
+    tabela(show, datas=["Data"], use_container_width=True, hide_index=True, height=460,
+           column_config={"Link": st.column_config.LinkColumn(
+               "Link", display_text="abrir ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="publicacoes_cvm.csv", mime="text/csv")
+
+
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
           "🗓️ Pautas de Julgamento", "📜 Decisões do Colegiado", "📋 Atas do CGE",
-          "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias"]
+          "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias",
+          "📑 Publicações (SEI)"]
 
 
 def main():
@@ -2724,6 +2785,8 @@ def main():
         render_quem()
     elif sel == SECOES[10]:
         render_noticias()
+    elif sel == SECOES[11]:
+        render_publicacoes()
 
 
 if __name__ == "__main__":
