@@ -24,6 +24,7 @@ import re
 import sys
 import glob
 import time
+import shutil
 import sqlite3
 import tempfile
 import datetime as dt
@@ -45,10 +46,15 @@ MESES = {"janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4,
 
 
 def _poppler_bin(exe):
-    hit = glob.glob(os.path.join(
+    # Linux/CI: binario no PATH ('pdftotext'); Windows: PATH ou poppler do winget.
+    base = exe[:-4] if exe.lower().endswith(".exe") else exe
+    hit = shutil.which(base) or shutil.which(exe)
+    if hit:
+        return hit
+    glb = glob.glob(os.path.join(
         os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages",
         "oschwartz10612.Poppler*", "poppler-*", "Library", "bin", exe))
-    return hit[0] if hit else exe
+    return glb[0] if glb else base
 
 
 PDFTOTEXT = _poppler_bin("pdftotext.exe")
