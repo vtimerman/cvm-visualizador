@@ -237,9 +237,27 @@ def stats(con=None):
         con.close()
 
 
+def aplicar_dossie(caminho):
+    """Grava dossiês {diretor: {...}} na tabela perfis."""
+    con = conectar()
+    dados = json.load(open(caminho, encoding="utf-8"))
+    hoje = dt.date.today().isoformat()
+    for diretor, d in dados.items():
+        con.execute(
+            "INSERT INTO perfis(diretor,dossie,ai_feito,atualizado_em) "
+            "VALUES(?,?,1,?) ON CONFLICT(diretor) DO UPDATE SET "
+            "dossie=excluded.dossie, ai_feito=1, atualizado_em=excluded.atualizado_em",
+            (diretor, json.dumps(d, ensure_ascii=False), hoje))
+    con.commit()
+    con.close()
+    print(f"[conduta] dossie(s) aplicado(s): {list(dados)}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "build"
     if cmd == "build":
         build()
+    elif cmd == "aplicar_dossie":
+        aplicar_dossie(sys.argv[2])
     else:
         stats()

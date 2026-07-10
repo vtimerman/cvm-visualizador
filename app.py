@@ -2385,6 +2385,40 @@ def render_decisoes():
                     st.dataframe(det_v, use_container_width=True, hide_index=True,
                                  column_config={"Ata": st.column_config.LinkColumn(
                                      "Ata", display_text="abrir ↗")})
+            # Dossiês de conduta (IA) — base do "agente" de cada diretor
+            if os.path.exists(CONDUTA_DB_PATH):
+                conp = sqlite3.connect(CONDUTA_DB_PATH)
+                try:
+                    perfis = {d: json.loads(j) for d, j in conp.execute(
+                        "SELECT diretor, dossie FROM perfis WHERE ai_feito=1")}
+                except Exception:
+                    perfis = {}
+                conp.close()
+                if perfis:
+                    st.divider()
+                    st.markdown("#### 🤖 Dossiê de conduta por diretor (base do agente)")
+                    dsel = st.selectbox("Diretor", sorted(perfis), key="dossie_dir",
+                                        index=None, placeholder="escolha um diretor…")
+                    if dsel:
+                        dd = perfis[dsel]
+                        for rot, campo in [
+                                ("Perfil", "perfil_resumido"),
+                                ("Padrão decisório", "padrao_decisorio"),
+                                ("Severidade / dosimetria", "severidade_dosimetria"),
+                                ("Temas recorrentes", "temas_recorrentes"),
+                                ("Divergências e vistas", "divergencias_e_vistas")]:
+                            v = str(dd.get(campo) or "").strip()
+                            if v:
+                                st.markdown(f"**{rot}:** {v}")
+                        casos = dd.get("casos_marcantes") or []
+                        if casos:
+                            st.markdown("**Casos marcantes:**")
+                            for c in casos:
+                                st.markdown(f"- {c}")
+                        sp = str(dd.get("system_prompt") or "").strip()
+                        if sp:
+                            with st.expander("🤖 System prompt do agente (copiar)"):
+                                st.code(sp, language=None)
 
     with aba_d:
         if dec is None or len(dec) == 0:
