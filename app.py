@@ -3585,13 +3585,217 @@ def render_busca():
 
 
 # --------------------------------------------------------------------------
+# Abas por CASO DE USO (Radar / Enforcement / Colegiado / Bastidores)
+# --------------------------------------------------------------------------
+def _novidades_7d():
+    """Coleta 'o que mudou' nos últimos 7 dias em todas as bases (robusto a
+    ausência de base/coluna). Retorna lista de seções (título, DataFrame)."""
+    corte = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    secoes = []
+
+    def q(db, sql, params=()):
+        try:
+            con = sqlite3.connect(db)
+            df = pd.read_sql(sql, con, params=params)
+            con.close()
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    d = q(DB_PATH, "SELECT data, componente, solicitante_nome AS solicitante, "
+          "solicitante_empresa AS empresa, assunto FROM audiencias WHERE "
+          "estado='valido' AND coletado_em>=? AND data_iso>=? ORDER BY data_iso",
+          (corte, corte))
+    if len(d):
+        secoes.append(("🏛️ Audiências novas/futuras", d))
+    d = q(JULGAR_DB_PATH, "SELECT data_julg AS julgado_em, relator_nome AS relator, "
+          "processo, tipo FROM julgados WHERE coletado_em>=? "
+          "ORDER BY id DESC LIMIT 30", (corte,))
+    if len(d):
+        secoes.append(("⚖️ Julgamentos que entraram na base", d))
+    d = q(TERMOS_DB_PATH,
+          "SELECT processo, situacao, data_decisao, partes FROM termos WHERE "
+          "coletado_em>=? ORDER BY data_decisao_iso DESC LIMIT 30", (corte,))
+    if len(d):
+        secoes.append(("🤝 Termos de Compromisso novos", d))
+    d = q(PAUTAS_DB_PATH, "SELECT data_sessao AS sessao, processo, relator, "
+          "situacao FROM pauta_sei WHERE coletado_em>=? ORDER BY data_sessao_iso",
+          (corte,))
+    if len(d):
+        secoes.append(("🗓️ Movimentos de pauta publicados", d))
+    d = q(PUBLICACOES_DB_PATH, "SELECT data, descricao, unidade, link FROM "
+          "publicacoes WHERE coletado_em>=? ORDER BY data_iso DESC LIMIT 40",
+          (corte,))
+    if len(d):
+        secoes.append(("📑 Publicações no Diário (SEI)", d))
+    d = q(PESSOAL_DB_PATH, "SELECT numero AS boletim, data, pdf_url AS link FROM "
+          "boletins WHERE coletado_em>=? AND texto<>'' ORDER BY data_iso DESC "
+          "LIMIT 15", (corte,))
+    if len(d):
+        secoes.append(("🏢 Boletins de Pessoal novos", d))
+    return secoes
+
+
+def render_radar():
+    st.subheader("🏠 Radar — o que está acontecendo na CVM")
+    hoje = dt.date.today()
+    # 1) Próximas sessões de julgamento + tirados de pauta (do Diário/SEI)
+    psei = carregar_pauta_sei()
+    jl = carregar_julgados()
+    set_julg = set(jl["proc_norm"]) - {""} if jl is not None else set()
+    if psei is not None and len(psei):
+        p2 = psei.copy()
+        p2["_ret"] = p2["situacao"].fillna("").str.startswith("retirado")
+        p2["_ord"] = p2["data_sessao_iso"].replace("", "0000-00-00")
+        ult = p2.sort_values("_ord").groupby("proc_norm", as_index=False).tail(1)
+        fut = ult[(~ult["proc_norm"].isin(set_julg)) & (~ult["_ret"]) &
+                  (ult["data_sessao_iso"] >= hoje.isoformat())]
+        tir = ult[(~ult["proc_norm"].isin(set_julg)) &
+                  (ult["_ret"] | ((ult["data_sessao_iso"] != "") &
+                                  (ult["data_sessao_iso"] < hoje.isoformat())))]
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"#### 🗓️ Próximos julgamentos ({len(fut)})")
+            if len(fut):
+                st.dataframe(fut.sort_values("_ord")[
+                    ["data_sessao", "processo", "relator"]].rename(columns={
+                        "data_sessao": "Sessão", "processo": "Processo",
+                        "relator": "Relator"}),
+                    use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhuma sessão futura pautada.")
+        with c2:
+            st.markdown(f"#### 🚨 Tirados de pauta pendentes ({len(tir)})")
+            if len(tir):
+                st.dataframe(tir.sort_values("_ord", ascending=False)[
+                    ["data_sessao", "processo", "situacao"]].rename(columns={
+                        "data_sessao": "Estava p/", "processo": "Processo",
+                        "situacao": "Situação"}),
+                    use_container_width=True, hide_index=True)
+            else:
+                st.success("Nenhum retirado de pauta pendente.")
+    # 2) O que mudou (7 dias)
+    st.divider()
+    st.markdown("#### 🆕 O que mudou nos últimos 7 dias")
+    novidades = _novidades_7d()
+    if not novidades:
+        st.info("Nada novo registrado nos últimos 7 dias.")
+    for titulo, df in novidades:
+        with st.expander(f"{titulo} ({len(df)})",
+                         expanded=(len(novidades) <= 3)):
+            cc = {"link": st.column_config.LinkColumn("link",
+                                                      display_text="abrir ↗")} \
+                if "link" in df.columns else None
+            st.dataframe(df, use_container_width=True, hide_index=True,
+                         column_config=cc)
+    # 3) Notícias recentes
+    nt = carregar_noticias()
+    if nt is not None and len(nt):
+        corte14 = (hoje - dt.timedelta(days=14)).isoformat()
+        rec = nt[nt["data_iso"] >= corte14].sort_values("data_iso",
+                                                        ascending=False)
+        if len(rec):
+            st.divider()
+            st.markdown(f"#### 🗞️ Notícias da CVM ({len(rec)} em 14 dias)")
+            st.dataframe(rec[["data", "titulo", "categoria", "url"]].rename(
+                columns={"data": "Data", "titulo": "Título",
+                         "categoria": "Categoria", "url": "Link"}).head(25),
+                use_container_width=True, hide_index=True,
+                column_config={"Link": st.column_config.LinkColumn(
+                    "Link", display_text="abrir ↗")})
+    # 4) Painel de métricas e fontes brutas (acervo)
+    st.divider()
+    with st.expander("📊 Painel de métricas (audiências e visão geral)"):
+        render_painel()
+    with st.expander("📚 Acervo bruto — Publicações Eletrônicas (SEI)"):
+        render_publicacoes()
+    with st.expander("🗞️ Acervo de notícias (busca completa)"):
+        render_noticias()
+
+
+def render_enforcement():
+    st.subheader("⚖️ Enforcement — o funil sancionador")
+    # funil: contadores
+    proc_pas, _ = carregar_pas()
+    jl = carregar_julgados()
+    tc = carregar_termos()
+    psei = carregar_pauta_sei()
+    hoje_iso = dt.date.today().isoformat()
+    n_estoque = len(proc_pas) if proc_pas is not None else 0
+    n_julg = len(jl) if jl is not None else 0
+    n_tc = len(tc) if tc is not None else 0
+    n_paut = 0
+    if psei is not None and len(psei):
+        set_j = set(jl["proc_norm"]) - {""} if jl is not None else set()
+        p2 = psei[(~psei["proc_norm"].isin(set_j)) &
+                  (psei["data_sessao_iso"] >= hoje_iso)]
+        n_paut = p2["proc_norm"].nunique()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📥 Sancionadores na base", f"{n_estoque:,}".replace(",", "."))
+    c2.metric("🗓️ Pautados p/ julgamento", n_paut)
+    c3.metric("⚖️ Julgados", n_julg)
+    c4.metric("🤝 Termos de Compromisso", f"{n_tc:,}".replace(",", "."))
+    st.caption("👆 O funil: processo aberto → pauta → julgamento (ou TC). "
+               "Clique em qualquer linha para abrir o dossiê completo do processo.")
+    visao = st.segmented_control(
+        "Etapa", ["📥 Processos", "🗓️ Pautas", "⚖️ Julgados", "🤝 Termos",
+                  "📂 Não-sancionadores", "📊 Relatores"],
+        key="enf_nav", default="📥 Processos", label_visibility="collapsed")
+    st.divider()
+    if visao == "📥 Processos":
+        render_processos_lista()
+    elif visao == "🗓️ Pautas":
+        render_pautas()
+    elif visao == "⚖️ Julgados":
+        render_julgados_lista()
+    elif visao == "🤝 Termos":
+        render_termos()
+    elif visao == "📂 Não-sancionadores":
+        render_nao_sancionadores()
+    elif visao == "📊 Relatores":
+        render_prazos()
+
+
+def render_colegiado():
+    st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
+    st.caption("Decisões e atas trazem também o **🗳️ Perfil de votação** — "
+               "conduta por diretor e dossiês (base dos agentes).")
+    visao = st.segmented_control(
+        "Seção", ["📜 Decisões, Atas e Votos", "📰 Informativos",
+                  "👥 Quem é Quem", "📋 Atas do CGE"],
+        key="col_nav", default="📜 Decisões, Atas e Votos",
+        label_visibility="collapsed")
+    st.divider()
+    if visao == "📜 Decisões, Atas e Votos":
+        render_decisoes()
+    elif visao == "📰 Informativos":
+        render_informativos()
+    elif visao == "👥 Quem é Quem":
+        render_quem()
+    elif visao == "📋 Atas do CGE":
+        render_atas()
+
+
+def render_bastidores():
+    st.subheader("🕵️ Bastidores — quem circula na CVM")
+    visao = st.segmented_control(
+        "Seção", ["🏛️ Audiências particulares", "🏢 Servidores e viagens"],
+        key="bas_nav", default="🏛️ Audiências particulares",
+        label_visibility="collapsed")
+    st.divider()
+    if visao == "🏛️ Audiências particulares":
+        render_audiencias()
+    else:
+        render_servidores()
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
-          "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
-          "🗓️ Pautas de Julgamento", "📜 Decisões do Colegiado", "📋 Atas do CGE",
-          "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias",
-          "📑 Publicações (SEI)", "🏢 Servidores", "🔎 Busca"]
+# Navegação por CASO DE USO (não por fonte). O acesso às fontes brutas segue
+# disponível: Publicações no acervo do Radar; tudo o mais dentro das 5 abas.
+SECOES = ["🏠 Radar", "🔎 Buscar", "⚖️ Enforcement", "🏛️ Colegiado",
+          "🕵️ Bastidores"]
 
 
 def main():
@@ -3608,36 +3812,15 @@ def main():
                        label_visibility="collapsed")
     sel = sel or SECOES[0]
     if sel == SECOES[0]:
-        render_painel()
+        render_radar()
     elif sel == SECOES[1]:
-        render_audiencias()
-    elif sel == SECOES[2]:
-        render_processos()
-    elif sel == SECOES[3]:
-        st.subheader("🤝 Termos de Compromisso — CVM")
-        render_termos()
-    elif sel == SECOES[4]:
-        st.subheader("📂 Processos Não-Sancionadores — CVM")
-        render_nao_sancionadores()
-    elif sel == SECOES[5]:
-        render_pautas()
-    elif sel == SECOES[6]:
-        render_decisoes()
-    elif sel == SECOES[7]:
-        render_atas()
-    elif sel == SECOES[8]:
-        st.subheader("📰 Informativos do Colegiado — CVM")
-        render_informativos()
-    elif sel == SECOES[9]:
-        render_quem()
-    elif sel == SECOES[10]:
-        render_noticias()
-    elif sel == SECOES[11]:
-        render_publicacoes()
-    elif sel == SECOES[12]:
-        render_servidores()
-    elif sel == SECOES[13]:
         render_busca()
+    elif sel == SECOES[2]:
+        render_enforcement()
+    elif sel == SECOES[3]:
+        render_colegiado()
+    elif sel == SECOES[4]:
+        render_bastidores()
 
 
 if __name__ == "__main__":
