@@ -32,6 +32,7 @@ jobs:
           set +e
           python publicacoes_baixar.py atualizar 10
           python pautas_sei_baixar.py backfill
+          python extratos_sei_baixar.py backfill
           python decisoes_baixar.py
           python atas_colegiado_texto.py
           python boletim_pessoal_baixar.py atualizar
@@ -54,3 +55,11 @@ jobs:
           git pull --rebase -X ours origin main || true
           git push origin HEAD:main
           python notificar.py "Coleta CVM (diaria): atualizados $CHANGED" || true
+      - name: Alertas cruzados
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python alertas_compostos.py || true
+          git add alertas.db 2>/dev/null || true
+          git diff --cached --quiet || { git commit -m "chore: estado de alertas"; git pull --rebase -X ours origin main || true; git push origin HEAD:main; }

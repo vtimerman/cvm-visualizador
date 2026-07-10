@@ -686,8 +686,11 @@ def render_julgados_lista():
         return ""
     res["Extrato (SEI)"] = res["proc_norm"].map(_extrato_julg) \
         if "proc_norm" in res.columns else ""
+    mmul = _mapa_multas()
+    res["Multas (R$)"] = res["proc_norm"].map(
+        lambda pn: mmul.get(pn, "")) if "proc_norm" in res.columns else ""
     cols = ["data_julg", "relator_nome", "processo", "tipo", "rito", "sup",
-            "Desfecho", "Extrato (SEI)", "Colegiado atual"]
+            "Desfecho", "Multas (R$)", "Extrato (SEI)", "Colegiado atual"]
     show = res[[c for c in cols if c in res.columns]].rename(columns={
         "data_julg": "Julgado em", "relator_nome": "Relator (julgamento)",
         "processo": "Processo", "tipo": "Tipo", "rito": "Rito",
@@ -3136,6 +3139,29 @@ def render_servidores():
             "Boletim (PDF)", display_text="abrir ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="viagens_servidores_cvm.csv", mime="text/csv")
+
+
+# --------------------------------------------------------------------------
+# Multas dos extratos de julgamento (Diário/SEI)
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=600)
+def _mapa_multas():
+    """proc_norm -> total de multas (R$, formatado) do Extrato de Sessão."""
+    if not os.path.exists(JULGAR_DB_PATH):
+        return {}
+    con = sqlite3.connect(JULGAR_DB_PATH)
+    out = {}
+    try:
+        for pn, tot in con.execute(
+                "SELECT proc_norm, SUM(multas_total) FROM extratos_julgamento "
+                "GROUP BY proc_norm"):
+            if tot:
+                out[pn] = f"{tot:,.2f}".replace(",", "X").replace(".", ",") \
+                    .replace("X", ".")
+    except Exception:
+        pass
+    con.close()
+    return out
 
 
 # --------------------------------------------------------------------------
