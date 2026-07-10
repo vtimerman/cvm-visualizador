@@ -114,13 +114,26 @@ def conectar():
     con.execute("""CREATE TABLE IF NOT EXISTS prazos(
         diretor TEXT, proc_norm TEXT, recebido_iso TEXT, julgado_iso TEXT,
         dias INTEGER, situacao TEXT, PRIMARY KEY (diretor, proc_norm))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS alinhamentos(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, diretor_a TEXT, tipo TEXT,
+        diretor_b TEXT, processo TEXT, data_iso TEXT, trecho TEXT)""")
     con.commit()
     return con
+
+
+def _diretores_citados(texto):
+    """Conjunto de diretores canonicos citados num trecho de votos."""
+    achados = set()
+    for d in DIRETORES:
+        if _key(d) in _key(texto):
+            achados.add(d)
+    return achados
 
 
 def build():
     con = conectar()
     con.execute("DELETE FROM eventos")
+    con.execute("DELETE FROM alinhamentos")
     ins = ("INSERT INTO eventos(diretor,papel,evento,processo,proc_norm,data_iso,"
            "valor,detalhe,fonte) VALUES(?,?,?,?,?,?,?,?,?)")
 
@@ -198,6 +211,36 @@ def build():
                 if d:
                     con.execute(ins, (d, "votante", "pediu_vista", proc, pn,
                                       data_iso, 0, ass, "atas_ficha"))
+            # correlacoes: num item POR MAIORIA, quem ficou vencido divergiu
+            # de quem prevaleceu (todos os demais diretores citados no voto)
+            if re.search(r"vencid", votos, re.I):
+                vencidos = set()
+                for m in re.finditer(r"vencid[oa]s?,? (?:o |a )?(?:Diretor[a]? |"
+                                     r"Presidente(?: Interino)? |Diretor "
+                                     r"Substituto )?([A-Za-zÀ-ú]+(?: "
+                                     r"[A-Za-zÀ-ú]+){0,4})", votos):
+                    d = canon(m.group(1))
+                    if d:
+                        vencidos.add(d)
+                citados = _diretores_citados(votos)
+                for v in vencidos:
+                    for w in citados - vencidos:
+                        con.execute(
+                            "INSERT INTO alinhamentos(diretor_a,tipo,diretor_b,"
+                            "processo,data_iso,trecho) VALUES(?,?,?,?,?,?)",
+                            (v, "divergiu_de", w, proc, data_iso, votos[:200]))
+            # correlacao: pedido de vista SOBRE relatoria de outro diretor
+            if drel:
+                for m in re.finditer(r"(?:pedido de vista d[oa]|pediu vista|"
+                                     r"solicitou vista)[^.]*?([A-Za-zÀ-ú]+(?: "
+                                     r"[A-Za-zÀ-ú]+){0,4})", votos + " " + dec):
+                    d = canon(m.group(1))
+                    if d and d != drel:
+                        con.execute(
+                            "INSERT INTO alinhamentos(diretor_a,tipo,diretor_b,"
+                            "processo,data_iso,trecho) VALUES(?,?,?,?,?,?)",
+                            (d, "pediu_vista_sobre", drel, proc, data_iso,
+                             ass[:200]))
             # TC aceito/rejeitado (item colegiado; valor quando citado)
             blob = (ass + " " + dec).lower()
             if "termo de compromisso" in blob:

@@ -3137,12 +3137,124 @@ def carregar_viagens():
     return df
 
 
+def _ficha_servidor(nome):
+    """Tudo sobre um servidor: viagens, boletins que o citam e menções no SEI."""
+    st.markdown(f"### 🗂️ {nome}")
+    k = _ent_key(nome)
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    vg = pd.read_sql("SELECT * FROM viagens WHERE servidor_key=:k", con,
+                     params={"k": k})
+    bols = pd.read_sql(
+        "SELECT numero, data, pdf_url FROM boletins WHERE texto LIKE :n "
+        "ORDER BY data_iso DESC LIMIT 60", con, params={"n": f"%{nome}%"})
+    con.close()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("✈️ Viagens", len(vg))
+    try:
+        tot = sum(float(str(v).replace(".", "").replace(",", "."))
+                  for v in vg["valor_diarias"] if str(v).strip())
+    except Exception:
+        tot = 0
+    c2.metric("💰 Diárias (R$)", f"{tot:,.0f}".replace(",", "."))
+    c3.metric("📋 Citado em boletins", len(bols))
+    if len(vg):
+        st.markdown("**✈️ Viagens:**")
+        st.dataframe(vg[["boletim_data_iso", "tipo", "origem", "destino",
+                         "periodo_ini", "valor_diarias", "motivo"]]
+                     .rename(columns={"boletim_data_iso": "Boletim",
+                                      "tipo": "Tipo", "origem": "Origem",
+                                      "destino": "Destino", "periodo_ini": "Início",
+                                      "valor_diarias": "Diárias (R$)",
+                                      "motivo": "Motivo"})
+                     .sort_values("Boletim", ascending=False),
+                     use_container_width=True, hide_index=True, height=240)
+    if len(bols):
+        st.markdown("**📋 Boletins de Pessoal que o citam** (nomeações, "
+                    "designações, afastamentos…):")
+        st.dataframe(bols.rename(columns={"numero": "Boletim", "data": "Data",
+                                          "pdf_url": "PDF"}),
+                     use_container_width=True, hide_index=True, height=200,
+                     column_config={"PDF": st.column_config.LinkColumn(
+                         "PDF", display_text="abrir ↗")})
+    pub = carregar_publicacoes()
+    if pub is not None:
+        m = pub["resumo"].fillna("").str.contains(re.escape(nome), case=False)
+        hits = pub[m]
+        if len(hits):
+            st.markdown(f"**📑 Menções no Diário (SEI) ({len(hits)}):**")
+            st.dataframe(hits[["data", "descricao", "unidade", "link"]]
+                         .rename(columns={"data": "Data", "descricao": "Descrição",
+                                          "unidade": "Unidade", "link": "Link"}),
+                         use_container_width=True, hide_index=True,
+                         column_config={"Link": st.column_config.LinkColumn(
+                             "Link", display_text="abrir ↗")})
+
+
+def _render_contratacoes():
+    """Contratações/projetos: portarias GELIC/SAD (SEI) × atas do CGE (IA)."""
+    st.markdown("#### 🏗️ Contratações e projetos internos")
+    st.caption("Cruza as portarias administrativas do Diário (GELIC = licitações "
+               "e contratos; SAD = administração) com as deliberações das Atas "
+               "do CGE (projetos, orçamento, contratações).")
+    tema = st.text_input("Filtrar por tema (ex.: sistema, contrato, projeto, "
+                         "orçamento…)", key="ctr_tema")
+    pub = carregar_publicacoes()
+    if pub is not None:
+        adm = pub[pub["unidade"].isin(["GELIC", "SAD", "DICON",
+                                       "GELIC-Restrito"])].copy()
+        if tema.strip():
+            adm = adm[(adm["descricao"].fillna("") + " " + adm["resumo"]
+                       .fillna("")).str.contains(re.escape(tema), case=False)]
+        st.markdown(f"**📑 Portarias e atos administrativos (SEI) — "
+                    f"{len(adm)}:**")
+        st.dataframe(adm.sort_values("data_iso", ascending=False)[
+            ["data", "descricao", "unidade", "resumo", "link"]].rename(
+                columns={"data": "Data", "descricao": "Descrição",
+                         "unidade": "Unidade", "resumo": "Resumo",
+                         "link": "Link"}).head(40),
+            use_container_width=True, hide_index=True, height=260,
+            column_config={"Link": st.column_config.LinkColumn(
+                "Link", display_text="abrir ↗")})
+    # atas do CGE (fichas IA)
+    if os.path.exists(ATAS_DB_PATH):
+        con = sqlite3.connect(ATAS_DB_PATH)
+        try:
+            cge = pd.read_sql(
+                "SELECT numero, data, resumo, deliberacoes, link FROM atas "
+                "WHERE resumo IS NOT NULL AND resumo<>'' ORDER BY data_iso DESC",
+                con)
+        except Exception:
+            cge = pd.DataFrame()
+        con.close()
+        if len(cge):
+            if tema.strip():
+                cge = cge[(cge["resumo"].fillna("") + " "
+                           + cge["deliberacoes"].fillna(""))
+                          .str.contains(re.escape(tema), case=False)]
+            st.markdown(f"**📋 Deliberações do CGE relacionadas ({len(cge)}):**")
+            for _, r in cge.head(10).iterrows():
+                st.markdown(f"- **CGE {r['numero']} ({r['data']})** — "
+                            f"{r['resumo']}  \n  ↳ *{r['deliberacoes']}*  "
+                            f"[ata ↗]({r['link']})")
+
+
 def render_servidores():
     st.subheader("🏢 Servidores da CVM — Viagens (Boletim de Pessoal)")
     df = carregar_viagens()
     if df is None or len(df) == 0:
         st.info("⏳ A base de viagens do Boletim de Pessoal ainda está sendo montada.")
         return
+    # ficha individual + contratações
+    nomes = sorted(df["servidor_nome"].dropna().unique())
+    sel_srv = st.selectbox("🗂️ Ficha do servidor", nomes, key="srv_ficha",
+                           index=None, placeholder="escolha um servidor para a "
+                           "ficha completa…")
+    if sel_srv:
+        _ficha_servidor(sel_srv)
+        st.divider()
+    with st.expander("🏗️ Contratações e projetos internos (GELIC/SAD × CGE)"):
+        _render_contratacoes()
+    st.divider()
     df = df.copy()
     df["_ano"] = df["boletim_data_iso"].astype(str).str[:4]
     st.caption(f"{len(df):,} viagens de {df['servidor_key'].nunique()} servidores "
@@ -3618,16 +3730,27 @@ def _novidades_7d():
           "coletado_em>=? ORDER BY data_decisao_iso DESC LIMIT 30", (corte,))
     if len(d):
         secoes.append(("🤝 Termos de Compromisso novos", d))
-    d = q(PAUTAS_DB_PATH, "SELECT data_sessao AS sessao, processo, relator, "
-          "situacao FROM pauta_sei WHERE coletado_em>=? ORDER BY data_sessao_iso",
+    # pauta: pela data de PUBLICACAO no Diario (dd/mm/aaaa -> iso), nao pelo
+    # coletado_em (um backfill marcaria o acervo inteiro como novidade)
+    d = q(PAUTAS_DB_PATH,
+          "SELECT data_publicacao AS publicado, data_sessao AS sessao, processo, "
+          "relator, situacao FROM pauta_sei WHERE "
+          "substr(data_publicacao,7,4)||'-'||substr(data_publicacao,4,2)||'-'||"
+          "substr(data_publicacao,1,2) >= ? ORDER BY data_sessao_iso DESC",
           (corte,))
     if len(d):
         secoes.append(("🗓️ Movimentos de pauta publicados", d))
-    d = q(PUBLICACOES_DB_PATH, "SELECT data, descricao, unidade, link FROM "
-          "publicacoes WHERE coletado_em>=? ORDER BY data_iso DESC LIMIT 40",
+    # SEI: so o pertinente a enforcement (pautas, extratos, intimacoes, editais,
+    # despachos em PAS) — portarias administrativas/reformas ficam no acervo
+    d = q(PUBLICACOES_DB_PATH, "SELECT data, descricao, unidade, resumo, link "
+          "FROM publicacoes WHERE coletado_em>=? AND ("
+          "descricao LIKE 'Pauta%' OR descricao LIKE 'Extrato de Sess%' OR "
+          "descricao LIKE 'Extrato de Termo%' OR descricao LIKE 'Extrato de Ata%' "
+          "OR descricao LIKE 'Intima%' OR descricao LIKE 'Edital%' OR "
+          "descricao LIKE 'Despacho%') ORDER BY data_iso DESC LIMIT 40",
           (corte,))
     if len(d):
-        secoes.append(("📑 Publicações no Diário (SEI)", d))
+        secoes.append(("📑 Publicações relevantes no Diário (SEI)", d))
     d = q(PESSOAL_DB_PATH, "SELECT numero AS boletim, data, pdf_url AS link FROM "
           "boletins WHERE coletado_em>=? AND texto<>'' ORDER BY data_iso DESC "
           "LIMIT 15", (corte,))
@@ -3849,6 +3972,44 @@ def render_ficha_diretor():
                 "proc_norm": "Processo", "recebido_iso": "Recebido em",
                 "dias": "Dias parado"}),
             use_container_width=True, hide_index=True, height=220)
+    # ---- correlações com os demais diretores -------------------------------
+    con2 = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        ali = pd.read_sql("SELECT * FROM alinhamentos", con2)
+    except Exception:
+        ali = pd.DataFrame()
+    con2.close()
+    if len(ali):
+        st.divider()
+        st.markdown("**🔗 Correlações com os demais diretores** "
+                    "(mineradas dos votos das atas):")
+        cX, cY = st.columns(2)
+        div_de = ali[(ali["diretor_a"] == d) & (ali["tipo"] == "divergiu_de")]
+        div_dele = ali[(ali["diretor_b"] == d) & (ali["tipo"] == "divergiu_de")]
+        with cX:
+            st.markdown(f"*{d} ficou vencido contra:*")
+            if len(div_de):
+                st.dataframe(div_de.groupby("diretor_b").size()
+                             .rename("vezes").reset_index().rename(
+                                 columns={"diretor_b": "Prevaleceu"}),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.caption("— nenhum registro —")
+        with cY:
+            st.markdown(f"*Divergiram de {d} (ele/ela prevaleceu):*")
+            if len(div_dele):
+                st.dataframe(div_dele.groupby("diretor_a").size()
+                             .rename("vezes").reset_index().rename(
+                                 columns={"diretor_a": "Vencido"}),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.caption("— nenhum registro —")
+        casos = ali[((ali["diretor_a"] == d) | (ali["diretor_b"] == d))]
+        if len(casos):
+            with st.expander(f"🔍 Casos das correlações ({len(casos)})"):
+                st.dataframe(casos[["data_iso", "diretor_a", "tipo",
+                                    "diretor_b", "processo", "trecho"]],
+                             use_container_width=True, hide_index=True)
     # ---- dossiê ------------------------------------------------------------
     if dossie:
         st.divider()
