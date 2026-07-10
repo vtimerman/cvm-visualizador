@@ -118,6 +118,56 @@ def extrair(limite=None):
     con.close()
 
 
+def aplicar_ia(caminho):
+    """Grava analises {arquivo: {...}} em doc_analises e as teses brutas."""
+    import json
+    con = conectar()
+    dados = json.load(open(caminho, encoding="utf-8"))
+    hoje = dt.date.today().isoformat()
+    n = nt = 0
+    for arq, a in dados.items():
+        pn = con.execute("SELECT proc_norm FROM docs WHERE arquivo=?",
+                         (arq,)).fetchone()
+        pn = pn[0] if pn else ""
+        con.execute(
+            "INSERT OR REPLACE INTO doc_analises(arquivo,proc_norm,data_julg,"
+            "relator,resultado,resumo,teses,area_tecnica,votos,ai_feito,"
+            "atualizado_em) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
+            (arq, pn, str(a.get("data_julgamento") or ""),
+             str(a.get("relator") or ""), str(a.get("resultado") or "")[:400],
+             str(a.get("resumo") or "")[:600],
+             json.dumps(a.get("teses") or [], ensure_ascii=False),
+             str(a.get("area_tecnica") or "")[:400],
+             json.dumps(a.get("votos") or {}, ensure_ascii=False), hoje))
+        n += 1
+        con.execute("DELETE FROM teses WHERE fonte_arquivo=?", (arq,))
+        for t in (a.get("teses") or []):
+            con.execute(
+                "INSERT INTO teses(tema,tese,processo,data,relator,status,"
+                "evolucao,fonte_arquivo) VALUES(?,?,?,?,?,?,?,?)",
+                (str(t.get("tema") or "outros")[:80],
+                 str(t.get("tese") or "")[:600], pn,
+                 str(a.get("data_julgamento") or ""),
+                 str(a.get("relator") or ""), "bruta", "", arq))
+            nt += 1
+    con.commit()
+    con.close()
+    print(f"[juris] {n} analise(s) e {nt} tese(s) aplicadas.")
+
+
+def pendentes_lista(n=15):
+    """Lista de arquivos legiveis ainda nao analisados (p/ lotes)."""
+    con = conectar()
+    rows = [r[0] for r in con.execute(
+        "SELECT d.arquivo FROM docs d LEFT JOIN doc_analises a "
+        "ON a.arquivo=d.arquivo AND a.ai_feito=1 WHERE d.legivel=1 "
+        "AND a.arquivo IS NULL ORDER BY d.ano_pasta DESC, d.arquivo "
+        "LIMIT ?", (int(n),))]
+    con.close()
+    for r in rows:
+        print(r)
+
+
 def stats(con=None):
     own = con is None
     con = con or conectar()
@@ -138,5 +188,9 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "stats"
     if cmd == "extrair":
         extrair(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif cmd == "aplicar_ia":
+        aplicar_ia(sys.argv[2])
+    elif cmd == "pendentes":
+        pendentes_lista(sys.argv[2] if len(sys.argv) > 2 else 15)
     else:
         stats()
