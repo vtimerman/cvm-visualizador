@@ -38,6 +38,7 @@ jobs:
           python boletim_pessoal_baixar.py atualizar
           python boletim_pessoal_extrair.py viagens
           python scraper.py revisar
+          python conduta_build.py build
           true
       - name: Commit, push e alerta
         env:

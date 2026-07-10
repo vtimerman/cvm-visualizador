@@ -544,6 +544,7 @@ def dialog_processo(row, acus):
         '</style></head><body><div id="width">'
         f'<h2>Processo Sancionador nº {e(row["numero"])}</h2>'
         f'<table>{corpo}</table>'
+        f'{_analise_html(_mapa_analises().get((_norm_proc(row["numero"]), "julgado")), e)}'
         f'{tl_html}'
         f'{julg_html}'
         f'<h3>Acusados ({len(ac)})</h3>'
@@ -1293,6 +1294,13 @@ def dialog_termo(row):
     pn = row["proc_norm"]
     badge = "✅ Aceito" if row["situacao"] == "Aceito" else "❌ Rejeitado"
     st.markdown(f"### Processo {row['processo']} — {badge}")
+    a_tc = _mapa_analises().get((pn, "tc"))
+    if a_tc:
+        with st.container(border=True):
+            st.markdown("**🧠 Análise (IA):** " + str(a_tc.get("resumo") or ""))
+            rac = str(a_tc.get("racional") or "").strip()
+            if rac and rac != "-":
+                st.caption(f"Racional: {rac}")
     linha = [f"**Decisão:** {row['data_decisao']}"]
     if str(row["data_assinatura"]).strip():
         linha.append(f"**Assinatura:** {row['data_assinatura']}")
@@ -1754,7 +1762,8 @@ _RUIDO_NOME = {"substituto", "substituta", "presidente", "relatora", "relator",
 PRES_TIMELINE = [
     ("Marcelo Barbosa", "", "2021-07-31"),
     ("João Pedro Nascimento", "2021-08-01", "2025-07-31"),
-    ("Otto Lobo", "2025-08-01", "9999-12-31"),
+    ("Otto Lobo", "2025-08-01", "2025-12-31"),      # interino; mandato encerrou
+    ("João Accioly", "2026-01-01", "9999-12-31"),   # presidente interino
 ]
 
 
@@ -2355,7 +2364,14 @@ def render_decisoes():
                       tot_v["acompanha_area"])
             cb.metric("Colegiado DIVERGIU da área técnica",
                       tot_v["diverge_area"])
-            if stats_v:
+            cond = _conduta_resumo()
+            if cond is not None and len(cond):
+                st.markdown("**Conduta decisória consolidada (base do agente "
+                            "por diretor):**")
+                st.caption("Cruza julgados × multas dos extratos × fichas das "
+                           "atas × retiradas de pauta (conduta.db).")
+                st.dataframe(cond, use_container_width=True, hide_index=True)
+            elif stats_v:
                 st.markdown("**Por diretor:**")
                 rk = pd.DataFrame([
                     {"Diretor": d, "Votos vencidos": s["vencido"],
@@ -3139,6 +3155,78 @@ def render_servidores():
             "Boletim (PDF)", display_text="abrir ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="viagens_servidores_cvm.csv", mime="text/csv")
+
+
+# --------------------------------------------------------------------------
+# Análises (IA) de julgados/TCs + conduta por diretor (conduta.db)
+# --------------------------------------------------------------------------
+CONDUTA_DB_PATH = os.environ.get("CONDUTA_DB_PATH", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "conduta.db"))
+
+
+@st.cache_data(ttl=600)
+def _mapa_analises():
+    """(proc_norm, tipo) -> análise IA (dict) do julgado/TC."""
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return {}
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    out = {}
+    try:
+        for pn, tipo, a in con.execute(
+                "SELECT proc_norm, tipo, analise FROM analises WHERE ai_feito=1"):
+            try:
+                out[(pn, tipo)] = json.loads(a)
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+    con.close()
+    return out
+
+
+@st.cache_data(ttl=600)
+def _conduta_resumo():
+    """DataFrame agregado da conduta decisória por diretor (conduta.db)."""
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return None
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        df = pd.read_sql("""
+            SELECT diretor AS "Diretor",
+              SUM(evento='julgou') AS "Julgou",
+              ROUND(SUM(CASE WHEN evento='julgou' THEN valor ELSE 0 END))
+                  AS "Multas (R$)",
+              SUM(evento='relatou_item') AS "Itens relatados",
+              SUM(evento='voto_vencido') AS "Vencido",
+              SUM(evento='pediu_vista') AS "Vistas",
+              SUM(evento='retirou_de_pauta') AS "Retirou de pauta"
+            FROM eventos WHERE diretor<>'(Colegiado)'
+            GROUP BY diretor ORDER BY 2 DESC""", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+def _analise_html(a, e):
+    """Bloco HTML da análise IA para o popup do processo."""
+    if not a:
+        return ""
+    linhas = ""
+    for rot, campo in [("Resumo", "resumo"), ("Conduta imputada", "conduta_imputada"),
+                       ("Desfecho", "desfecho"), ("Severidade", "severidade"),
+                       ("Racional da decisão", "racional"),
+                       ("Conduta do relator", "conduta_relator")]:
+        v = str(a.get(campo) or "").strip()
+        if v and v != "-":
+            linhas += (f'<tr><td class="upperHeader" style="white-space:nowrap">'
+                       f'{rot}</td><td>{e(v)}</td></tr>')
+    if not linhas:
+        return ""
+    return ('<h3>🧠 Análise do caso (IA)</h3>'
+            '<p style="font-size:11px">Gerada por IA a partir do material oficial '
+            '(objeto, acusados, extrato da sessão, atas). Confira sempre na fonte.</p>'
+            f'<table>{linhas}</table>')
 
 
 # --------------------------------------------------------------------------
