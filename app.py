@@ -499,12 +499,52 @@ def dialog_processo(row, acus):
             f'<td>Relator</td><td>Advogados</td><td>Documento</td></tr>{pl}</table>')
     else:
         pautas_html = ''
+    # 📅 Linha do tempo unificada: todos os eventos do processo em ordem.
+    eventos = []
+
+    def _ev(data_txt, rotulo, detalhe):
+        d = _to_date(data_txt)
+        if d:
+            eventos.append((d.isoformat(), data_txt, rotulo, detalhe))
+    _ev(row.get("data_abertura", ""), "📂 Abertura do processo",
+        str(row.get("fase") or ""))
+    for d0 in desp[:40]:
+        _ev(d0.get("data", ""), "🏛️ Audiência/Despacho",
+            f'{d0.get("componente", "")} — {str(d0.get("assunto") or "")[:90]}')
+    if tc is not None and len(tcm):
+        for _, t in tcm.iterrows():
+            _ev(t["data_decisao"], f'🤝 Termo de Compromisso {t["situacao"]}',
+                str(t["partes"] or "")[:90])
+    for data, data_iso, tipo, ementa, _lk in decs[:40]:
+        _ev(data, f'📜 Decisão do Colegiado ({tipo})', str(ementa or "")[:90])
+    for pt in pautas:
+        sit = str(pt.get("situacao") or "incluido")
+        _ev(pt.get("data_sessao", ""),
+            "🚫 Retirado de pauta" if sit.startswith("retirado")
+            else "🗓️ Incluído em pauta", f'Relator: {pt.get("relator", "")}')
+    for x in julgs:
+        _ev(x["data"], "⚖️ JULGADO", f'Relator: {x["relator"]} · {x["rito"]}')
+    for p0 in pubs[:60]:
+        _ev(p0["data"], f'📑 {p0["tipo"]}', str(p0["resumo"] or "")[:90])
+    eventos.sort(key=lambda x: x[0])
+    if eventos:
+        tl = "".join(
+            f'<tr><td style="white-space:nowrap">{e(dt_txt)}</td>'
+            f'<td style="white-space:nowrap"><b>{rot}</b></td><td>{e(det)}</td></tr>'
+            for _iso2, dt_txt, rot, det in eventos)
+        tl_html = (
+            f'<h3>📅 Linha do tempo ({len(eventos)} eventos)</h3>'
+            '<table><tr class="header"><td>Data</td><td>Evento</td>'
+            f'<td>Detalhe</td></tr>{tl}</table>')
+    else:
+        tl_html = ''
     doc = (
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<style>{CSS_CVM} td{{font-size:13px}} h3{{font-family:Arial;font-size:1rem}}'
         '</style></head><body><div id="width">'
         f'<h2>Processo Sancionador nº {e(row["numero"])}</h2>'
         f'<table>{corpo}</table>'
+        f'{tl_html}'
         f'{julg_html}'
         f'<h3>Acusados ({len(ac)})</h3>'
         '<table><tr class="header"><td>Nome/Razão social</td><td>Desfecho</td>'
@@ -515,7 +555,7 @@ def dialog_processo(row, acus):
     components.html(doc, height=620 + len(ac) * 70 + len(hist) * 34
                     + len(decs[:40]) * 30 + len(julgs) * 32
                     + len(desp[:40]) * 34 + len(pubs[:60]) * 30
-                    + len(pautas) * 30, scrolling=True)
+                    + len(pautas) * 30 + len(eventos) * 28, scrolling=True)
     nomes_ac = [a["nome"] for _, a in ac.iterrows()] if len(ac) else []
     _bloco_noticias_md(_norm_proc(row["numero"]), nomes=nomes_ac)
 
@@ -2291,7 +2331,41 @@ def render_decisoes():
     na = len(atc) if atc is not None else 0
     st.caption(f"{nd:,} decisões do Colegiado • {na:,} atas de reuniões. "
                "Fonte: conteudo.cvm.gov.br/decisoes.".replace(",", "."))
-    aba_d, aba_a = st.tabs(["📜 Decisões", "📋 Atas do Colegiado"])
+    aba_d, aba_a, aba_v = st.tabs(["📜 Decisões", "📋 Atas do Colegiado",
+                                   "🗳️ Perfil de votação"])
+    with aba_v:
+        stats_v, tot_v, det_v = _minerar_votos()
+        if not tot_v.get("itens"):
+            st.info("⏳ As fichas IA das atas ainda não estão disponíveis.")
+        else:
+            st.caption(f"Minerado das fichas IA de {tot_v['itens']} itens de pauta "
+                       "das atas do Colegiado (2022+). Dado inédito: como cada "
+                       "diretor vota.")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Itens analisados", tot_v["itens"])
+            pu = 100 * tot_v["unanime"] / max(1, tot_v["itens"])
+            c2.metric("Unânimes", f"{tot_v['unanime']} ({pu:.0f}%)")
+            c3.metric("Por maioria", tot_v["maioria"])
+            c4.metric("Com pedido de vista", tot_v["vista"])
+            ca, cb = st.columns(2)
+            ca.metric("Colegiado ACOMPANHOU a área técnica",
+                      tot_v["acompanha_area"])
+            cb.metric("Colegiado DIVERGIU da área técnica",
+                      tot_v["diverge_area"])
+            if stats_v:
+                st.markdown("**Por diretor:**")
+                rk = pd.DataFrame([
+                    {"Diretor": d, "Votos vencidos": s["vencido"],
+                     "Pedidos de vista": s["vista"],
+                     "Divergências abertas": s["divergencia"]}
+                    for d, s in stats_v.items()]).sort_values(
+                        ["Votos vencidos", "Pedidos de vista"], ascending=False)
+                st.dataframe(rk, use_container_width=True, hide_index=True)
+            if det_v is not None and len(det_v):
+                with st.expander(f"🔍 Casos detectados ({len(det_v)})"):
+                    st.dataframe(det_v, use_container_width=True, hide_index=True,
+                                 column_config={"Ata": st.column_config.LinkColumn(
+                                     "Ata", display_text="abrir ↗")})
 
     with aba_d:
         if dec is None or len(dec) == 0:
@@ -3007,13 +3081,289 @@ def render_servidores():
 
 
 # --------------------------------------------------------------------------
+# Mineração dos votos (fichas IA das atas do Colegiado)
+# --------------------------------------------------------------------------
+_DIRETORES_VOTO = ["Otto Lobo", "Joao Accioly", "João Accioly", "Marina Copola",
+                   "Joao Pedro Nascimento", "João Pedro Nascimento", "Daniel Maeda",
+                   "Otavio Yazbek", "Flavia Perlingeiro", "Flávia Perlingeiro",
+                   "Alexandre Rangel", "Marcelo Barbosa", "Thiago Paiva Chaves",
+                   "Luis Felipe Marques Lobianco", "Luís Felipe Marques Lobianco",
+                   "Andre Passaro", "André Passaro", "Igor Muniz"]
+
+
+def _dir_canon(nome):
+    """Nome canônico (sem acento) do diretor citado num trecho de voto."""
+    k = _ent_key(nome)
+    for d in _DIRETORES_VOTO:
+        if _ent_key(d) in k or k in _ent_key(d):
+            return _ent_key(d).title()
+    return ""
+
+
+@st.cache_data(ttl=600)
+def _minerar_votos():
+    """Estatísticas por diretor a partir das fichas IA das atas (2022+):
+    vencido (voto vencido), vista (pedidos de vista), diverge_area (item em que o
+    Colegiado divergiu da área técnica) e itens totais analisados."""
+    atc = carregar_atas_colegiado()
+    stats = {}
+    tot = {"itens": 0, "unanime": 0, "maioria": 0, "vista": 0,
+           "diverge_area": 0, "acompanha_area": 0}
+    if atc is None or "ficha" not in atc.columns:
+        return stats, tot, pd.DataFrame()
+    detalhes = []
+    for _, r in atc.iterrows():
+        try:
+            f = json.loads(r.get("ficha") or "")
+        except (ValueError, TypeError):
+            continue
+        for it in (f.get("itens") or []):
+            tot["itens"] += 1
+            votos = str(it.get("votos") or "")
+            vota = str(it.get("votacao") or "")
+            dec = str(it.get("decisao") or "") + " " + votos
+            vlow = (vota + " " + votos).lower()
+            if "unanime" in vlow or "unânime" in vlow:
+                tot["unanime"] += 1
+            if "maioria" in vlow:
+                tot["maioria"] += 1
+            dl = dec.lower()
+            if re.search(r"divergindo da .rea|contrariando a .rea|"
+                         r"divergiu da .rea", dl):
+                tot["diverge_area"] += 1
+            elif re.search(r"acompanhando (a|o) (manifesta|parecer|.rea|conclus)", dl):
+                tot["acompanha_area"] += 1
+
+            def _reg(nome, campo, trecho):
+                dcanon = _dir_canon(nome)
+                if not dcanon:
+                    return
+                s = stats.setdefault(dcanon, {"vencido": 0, "vista": 0,
+                                              "divergencia": 0})
+                s[campo] += 1
+                detalhes.append({"Diretor": dcanon, "Evento": campo,
+                                 "Data": r.get("data", ""),
+                                 "Processo": it.get("processo", ""),
+                                 "Assunto": str(it.get("assunto") or "")[:80],
+                                 "Trecho": trecho[:160],
+                                 "Ata": r.get("link", "")})
+            for m in re.finditer(r"vencid[oa][s]?(?:,)? (?:o |a )?(?:Diretor[a]? |"
+                                 r"Presidente(?: Interino)? |Diretor Substituto )?"
+                                 r"([A-ZÀ-Ú][a-zà-ú]+(?: [A-ZÀ-Úa-zà-ú]+){0,4})",
+                                 votos):
+                _reg(m.group(1), "vencido", votos)
+            for m in re.finditer(r"(?:pedido de vista d[oa]|solicitou vista|"
+                                 r"pediu vista)[^.]*?([A-ZÀ-Ú][a-zà-ú]+"
+                                 r"(?: [A-ZÀ-Úa-zà-ú]+){0,4})", votos + " " + dec):
+                _reg(m.group(1), "vista", votos or dec)
+            if re.search(r"\bvista\b", vlow):
+                tot["vista"] += 1
+            for m in re.finditer(r"(?:divergiu|abriu diverg[eê]ncia|voto divergente"
+                                 r")[^.]*?([A-ZÀ-Ú][a-zà-ú]+(?: [A-ZÀ-Úa-zà-ú]+)"
+                                 r"{0,4})", votos):
+                _reg(m.group(1), "divergencia", votos)
+    return stats, tot, pd.DataFrame(detalhes)
+
+
+# --------------------------------------------------------------------------
+# Entidades (pessoas/empresas) + Busca global
+# --------------------------------------------------------------------------
+def _ent_key(nome):
+    """Nome normalizado p/ casar a mesma pessoa/empresa entre bases."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(nome or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s).strip().upper()
+
+
+@st.cache_data(ttl=600)
+def _indice_entidades():
+    """entidade_key -> aparições em todas as bases (acusado, TC, audiências)."""
+    idx = {}
+
+    def add(nome, tipo, item):
+        k = _ent_key(nome)
+        if len(k) < 6:
+            return
+        e = idx.setdefault(k, {"nome": str(nome).strip(), "acusado": [],
+                               "tc": [], "aud": []})
+        e[tipo].append(item)
+
+    proc, acus = carregar_pas()
+    if proc is not None and acus is not None:
+        pn_por_id = {r["idproc"]: (r["numero"], _norm_proc(r["numero"]))
+                     for _, r in proc.iterrows()}
+        for _, a in acus.iterrows():
+            num, pn = pn_por_id.get(a["idproc"], ("", ""))
+            if num:
+                add(a["nome"], "acusado",
+                    {"processo": num, "proc_norm": pn, "situacao": a["situacao"],
+                     "desfecho": _desfecho_acusado(a["situacao"], a["historico"])})
+    tc = carregar_termos()
+    if tc is not None:
+        for _, t in tc.iterrows():
+            for nome in re.split(r"[;|]| e ", str(t["partes"] or "")):
+                if len(nome.strip()) > 5:
+                    add(nome, "tc", {"processo": t["processo"],
+                                     "situacao": t["situacao"],
+                                     "data": t["data_decisao"], "link": t["link"]})
+    aud = carregar()
+    if aud is not None:
+        for _, r in aud.iterrows():
+            item = {"id": r["id"], "data": r["data"], "componente": r["componente"],
+                    "assunto": r["assunto"]}
+            if str(r["solicitante_nome"]).strip():
+                add(r["solicitante_nome"], "aud", item)
+            if str(r["solicitante_empresa"]).strip():
+                add(r["solicitante_empresa"], "aud", item)
+    return idx
+
+
+def _render_ficha_entidade(k, e):
+    """Ficha consolidada de uma pessoa/empresa (todas as bases)."""
+    st.markdown(f"### 👤 {e['nome']}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Acusado em", len(e["acusado"]))
+    c2.metric("Termos de Compromisso", len(e["tc"]))
+    c3.metric("Audiências", len(e["aud"]))
+    if e["acusado"]:
+        st.markdown("**⚖️ Processos em que é acusado:**")
+        st.dataframe(pd.DataFrame(e["acusado"])[["processo", "situacao", "desfecho"]]
+                     .rename(columns={"processo": "Processo", "situacao": "Situação",
+                                      "desfecho": "Desfecho"}),
+                     use_container_width=True, hide_index=True)
+    if e["tc"]:
+        st.markdown("**🤝 Termos de Compromisso (como parte):**")
+        st.dataframe(pd.DataFrame(e["tc"])[["processo", "situacao", "data"]]
+                     .rename(columns={"processo": "Processo", "situacao": "Situação",
+                                      "data": "Decisão"}),
+                     use_container_width=True, hide_index=True)
+    if e["aud"]:
+        st.markdown(f"**🏛️ Audiências particulares ({len(e['aud'])}):**")
+        st.dataframe(pd.DataFrame(e["aud"])[["data", "componente", "assunto"]]
+                     .rename(columns={"data": "Data", "componente": "Área",
+                                      "assunto": "Assunto"}).head(40),
+                     use_container_width=True, hide_index=True)
+    _bloco_noticias_md("", nomes=[e["nome"]],
+                       titulo="**🗞️ Notícias que citam o nome:**")
+
+
+def render_busca():
+    st.subheader("🔎 Busca global — todas as bases")
+    q = st.text_input("Nome, empresa, nº de processo ou tema",
+                      key="bg_q", placeholder="ex.: XP Investimentos, 19957.003747/2023-43, insider…")
+    if not q.strip():
+        st.caption("A busca varre processos, acusados, termos, audiências, decisões, "
+                   "atas, pautas, publicações (SEI), notícias, servidores e Quem é Quem.")
+        return
+    ql = q.lower().strip()
+    pn_q = _norm_proc(q)
+
+    # 1) Entidades (pessoas/empresas)
+    idx = _indice_entidades()
+    hits_ent = [(k, e) for k, e in idx.items() if ql in e["nome"].lower()
+                or ql.upper() in k][:30]
+    if hits_ent:
+        st.markdown(f"#### 👤 Pessoas/Empresas ({len(hits_ent)})")
+        nomes = {e["nome"]: k for k, e in hits_ent}
+        sel = st.selectbox("Ver ficha consolidada de:", list(nomes), key="bg_ent")
+        if sel:
+            _render_ficha_entidade(nomes[sel], idx[nomes[sel]])
+        st.divider()
+
+    def _tab(titulo, df, cols, ren=None, links=None):
+        if df is None or not len(df):
+            return
+        st.markdown(f"#### {titulo} ({len(df)})")
+        show = df[cols].rename(columns=ren or {})
+        cc = {c: st.column_config.LinkColumn(c, display_text="abrir ↗")
+              for c in (links or [])}
+        st.dataframe(show.head(50), use_container_width=True, hide_index=True,
+                     column_config=cc or None)
+
+    # 2) Processos sancionadores
+    proc, _ = carregar_pas()
+    if proc is not None:
+        m = (proc["numero"].str.contains(re.escape(q), case=False, na=False)
+             | proc["objeto"].fillna("").str.contains(re.escape(q), case=False)
+             | proc["ementa"].fillna("").str.contains(re.escape(q), case=False)
+             | proc["acusados"].fillna("").str.contains(re.escape(q), case=False))
+        if pn_q:
+            m |= proc["numero"].map(_norm_proc) == pn_q
+        _tab("⚖️ Processos sancionadores", proc[m],
+             ["numero", "fase", "objeto"], {"numero": "Processo", "fase": "Fase",
+                                            "objeto": "Objeto"})
+    # 3) Termos
+    tc = carregar_termos()
+    if tc is not None:
+        m = (tc["processo"].str.contains(re.escape(q), case=False, na=False)
+             | tc["partes"].fillna("").str.contains(re.escape(q), case=False))
+        _tab("🤝 Termos de Compromisso", tc[m],
+             ["processo", "situacao", "data_decisao", "partes"],
+             {"processo": "Processo", "situacao": "Situação",
+              "data_decisao": "Decisão", "partes": "Partes"})
+    # 4) Audiências
+    aud = carregar()
+    if aud is not None:
+        m = (aud["solicitante_nome"].fillna("").str.contains(re.escape(q), case=False)
+             | aud["solicitante_empresa"].fillna("").str.contains(re.escape(q), case=False)
+             | aud["assunto"].fillna("").str.contains(re.escape(q), case=False))
+        _tab("🏛️ Audiências particulares", aud[m].sort_values("data_iso", ascending=False),
+             ["data", "componente", "solicitante_nome", "solicitante_empresa", "assunto"],
+             {"data": "Data", "componente": "Área", "solicitante_nome": "Solicitante",
+              "solicitante_empresa": "Empresa", "assunto": "Assunto"})
+    # 5) Decisões do Colegiado
+    dec = carregar_decisoes()
+    if dec is not None:
+        m = (dec["titulo"].fillna("").str.contains(re.escape(q), case=False)
+             | dec["ementa"].fillna("").str.contains(re.escape(q), case=False))
+        _tab("📜 Decisões do Colegiado", dec[m].sort_values("data_iso", ascending=False),
+             ["data", "tipo", "ementa", "link"],
+             {"data": "Data", "tipo": "Tipo", "ementa": "Ementa", "link": "Link"},
+             links=["Link"])
+    # 6) Publicações SEI
+    pub = carregar_publicacoes()
+    if pub is not None:
+        m = (pub["descricao"].fillna("").str.contains(re.escape(q), case=False)
+             | pub["resumo"].fillna("").str.contains(re.escape(q), case=False))
+        _tab("📑 Publicações (SEI)", pub[m].sort_values("data_iso", ascending=False),
+             ["data", "descricao", "unidade", "link"],
+             {"data": "Data", "descricao": "Descrição", "unidade": "Unidade",
+              "link": "Link"}, links=["Link"])
+    # 7) Notícias
+    nt = carregar_noticias()
+    if nt is not None and len(nt):
+        m = nt["titulo"].fillna("").str.contains(re.escape(q), case=False)
+        _tab("🗞️ Notícias", nt[m].sort_values("data_iso", ascending=False),
+             ["data", "titulo", "categoria", "url"],
+             {"data": "Data", "titulo": "Título", "categoria": "Categoria",
+              "url": "Link"}, links=["Link"])
+    # 8) Servidores (viagens)
+    vg = carregar_viagens()
+    if vg is not None:
+        m = vg["servidor_nome"].fillna("").str.contains(re.escape(q), case=False)
+        _tab("🏢 Servidores — viagens", vg[m].sort_values("boletim_data_iso",
+                                                          ascending=False),
+             ["servidor_nome", "tipo", "destino", "periodo_ini", "valor_diarias"],
+             {"servidor_nome": "Servidor", "tipo": "Tipo", "destino": "Destino",
+              "periodo_ini": "Início", "valor_diarias": "Diárias (R$)"})
+    # 9) Quem é Quem
+    qq = carregar_quem()
+    if qq is not None:
+        m = (qq["nome"].fillna("").str.contains(re.escape(q), case=False)
+             | qq["cargo"].fillna("").str.contains(re.escape(q), case=False))
+        _tab("👥 Quem é Quem", qq[m], ["nome", "cargo", "sigla"],
+             {"nome": "Nome", "cargo": "Cargo", "sigla": "Sigla"})
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos Sancionadores",
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
           "🗓️ Pautas de Julgamento", "📜 Decisões do Colegiado", "📋 Atas do CGE",
           "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias",
-          "📑 Publicações (SEI)", "🏢 Servidores"]
+          "📑 Publicações (SEI)", "🏢 Servidores", "🔎 Busca"]
 
 
 def main():
@@ -3058,6 +3408,8 @@ def main():
         render_publicacoes()
     elif sel == SECOES[12]:
         render_servidores()
+    elif sel == SECOES[13]:
+        render_busca()
 
 
 if __name__ == "__main__":
