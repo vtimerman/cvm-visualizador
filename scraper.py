@@ -309,8 +309,43 @@ def cmd_atualizar():
         print(f"[atualizar] {len(novos)} novos (muitos) — notificacao suprimida "
               f"(provavel carga inicial).")
 
+    # Auto-cura: audiencias sao publicadas como placeholder vazio e preenchidas
+    # depois pela CVM. Re-visita os vazios recentes para promove-los.
+    janela = int(os.environ.get("REVISAR_JANELA", "1500"))
+    ids_rev = [r[0] for r in con.execute(
+        "SELECT id FROM audiencias WHERE estado='vazio' AND id>=? ORDER BY id DESC",
+        (max(1, m - janela),)).fetchall()]
+    prom = revisar_ids(con, ids_rev)
     con.close()
-    print(f"[atualizar] concluido ({len(novos)} novo(s)).")
+    print(f"[atualizar] concluido ({len(novos)} novo(s), {prom} vazio(s) promovido(s)).")
+
+
+def revisar_ids(con, ids):
+    """Re-busca uma lista de ids 'vazio' e promove os que ganharam conteudo."""
+    prom = 0
+    for i, id_ in enumerate(ids, 1):
+        if coletar_um(con, id_) == "valido":
+            prom += 1
+            print(f"  promovido id={id_}")
+        con.commit()
+        if i % 200 == 0:
+            print(f"  ... revisados {i}/{len(ids)} ({prom} promovidos)")
+        time.sleep(PAUSA)
+    return prom
+
+
+def cmd_revisar(desde_id=0, limite=None):
+    """Re-busca TODOS os registros 'vazio' (id>=desde_id) e promove os preenchidos."""
+    con = conectar()
+    ids = [r[0] for r in con.execute(
+        "SELECT id FROM audiencias WHERE estado='vazio' AND id>=? ORDER BY id DESC",
+        (int(desde_id),)).fetchall()]
+    if limite:
+        ids = ids[:int(limite)]
+    print(f"[revisar] {len(ids)} vazios a revisar (a partir de {desde_id})")
+    prom = revisar_ids(con, ids)
+    con.close()
+    print(f"[revisar] concluido: {prom} promovidos de {len(ids)}")
 
 
 def cmd_seed_tsv(caminho):
@@ -357,6 +392,10 @@ if __name__ == "__main__":
         cmd_backfill(ini, fim)
     elif cmd == "atualizar":
         cmd_atualizar()
+    elif cmd == "revisar":
+        desde = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+        lim = int(sys.argv[3]) if len(sys.argv) > 3 else None
+        cmd_revisar(desde, lim)
     elif cmd == "seed_tsv":
         cmd_seed_tsv(sys.argv[2])
     elif cmd == "stats":

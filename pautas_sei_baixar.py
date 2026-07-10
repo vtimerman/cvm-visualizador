@@ -78,10 +78,11 @@ def _mk(d, mo, a):
 def _data_sessao(txt, retirado=False):
     """Data da sessao: 'Data : DD.MM.AAAA' (inclusao) ou 'retirado da pauta da
     sessao de julgamento de DD/MM/AAAA' (retirada). Aceita data por extenso."""
+    D = r"(\d{1,2})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{4})"  # tolera '23 .12.2025'
     pats = ([r"retirad[oa]\s+da\s+pauta\s+da\s+sess[ãa]o\s+de\s+julgamento\s+de\s+"
-             r"(\d{1,2})[./](\d{1,2})[./](\d{4})"] if retirado else []) + [
-        r"Data\s*:\s*(\d{1,2})[./](\d{1,2})[./](\d{4})",
-        r"sess[ãa]o\s+de\s+julgamento\s+de\s+(\d{1,2})[./](\d{1,2})[./](\d{4})"]
+             + D] if retirado else []) + [
+        r"Data\s*:\s*" + D,
+        r"sess[ãa]o\s+de\s+julgamento\s+de\s+" + D]
     for p in pats:
         m = re.search(p, txt, re.I)
         if m:

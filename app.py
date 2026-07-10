@@ -2502,46 +2502,51 @@ def render_pautas():
     else:
         st.success("Nenhum processo tirado de pauta detectado até agora "
                    "(o rastreio começa quando surge a 2ª versão da pauta).")
-    # --- Pautas publicadas no Diário (SEI): histórico + roteamento ---
+    # --- Pautas publicadas no Diário (SEI): 1 linha por PROCESSO (última situação) ---
     psei = carregar_pauta_sei()
     if psei is not None and len(psei):
         st.divider()
         st.markdown("#### 📜 Pautas de julgamento publicadas no Diário (SEI)")
         st.caption(
-            f"Fonte oficial · {len(psei)} inclusões/retiradas de pauta. "
-            "Processos **já julgados** aparecem na aba ✅ Julgados; aqui ficam os "
-            "**pendentes** e os **retirados de pauta**.")
-        p2 = psei.copy()
-        p2["_julg"] = p2["proc_norm"].isin(set_julg)
+            f"Fonte oficial · {len(psei)} inclusões/retiradas. Agregado por processo "
+            "(situação mais recente). **Já julgados** vão para a aba ✅ Julgados; aqui "
+            "ficam **pendentes** e **retirados de pauta**.")
         hoje_iso = hoje.isoformat()
-        sit = p2["situacao"].fillna("")
-        is_ret = sit.str.startswith("retirado")
-        passou = ((p2["data_sessao_iso"] != "") &
-                  (p2["data_sessao_iso"] < hoje_iso) & (~p2["_julg"]))
+        p2 = psei.copy()
+        p2["_ret"] = p2["situacao"].fillna("").str.startswith("retirado")
+        p2["_ord"] = p2["data_sessao_iso"].replace("", "0000-00-00")
+        ever_ret = p2.groupby("proc_norm")["_ret"].any()
+        # última linha (sessão mais recente) por processo
+        ult = p2.sort_values("_ord").groupby("proc_norm", as_index=False).tail(1).copy()
+        ult["_julg"] = ult["proc_norm"].isin(set_julg)
+        ult["_ever_ret"] = ult["proc_norm"].map(ever_ret)
+        tem_data = ult["data_sessao_iso"] != ""
+        fut = tem_data & (ult["data_sessao_iso"] >= hoje_iso)
+        passou = tem_data & (ult["data_sessao_iso"] < hoje_iso)
         cols_sei = {"data_sessao": "Sessão", "processo": "Processo",
                     "relator": "Relator", "situacao": "Situação", "objeto": "Objeto",
                     "link_sei": "Documento"}
         lc = {"Documento": st.column_config.LinkColumn("Documento",
                                                        display_text="abrir ↗")}
-        # Tirados de pauta (retirada explícita OU sessão passou sem julgamento)
-        tir = p2[(is_ret | passou) & (~p2["_julg"])]
+        # Tirados: não julgado E (última ação = retirada OU sessão passou sem julgar)
+        tir = ult[(~ult["_julg"]) & (ult["_ret"] | passou)]
         st.markdown(f"##### 🚨 Tirados de pauta pelo Diário ({len(tir)})")
         if len(tir):
-            st.caption("Retirada publicada no Diário ('retirado da pauta', inclusive "
-                       "*sine die*) ou sessão que passou sem o processo ser julgado.")
-            tabela(tir.sort_values("data_sessao_iso", ascending=False)[list(cols_sei)]
+            st.caption("Processo não julgado cuja situação mais recente é retirada "
+                       "('retirado da pauta', inclusive *sine die*) ou cuja sessão "
+                       "passou sem julgamento. Já consta no popup do processo.")
+            tabela(tir.sort_values("_ord", ascending=False)[list(cols_sei)]
                    .rename(columns=cols_sei), datas=["Sessão"], hide_index=True,
                    use_container_width=True, column_config=lc)
         else:
             st.success("Nenhum retirado de pauta pendente detectado no Diário.")
-        # Pendentes de julgamento (não julgados, sessão futura/sem data)
-        pend = p2[(~p2["_julg"]) & (~is_ret) &
-                  ((p2["data_sessao_iso"] >= hoje_iso) | (p2["data_sessao_iso"] == ""))]
+        # Pendentes: não julgado, última sessão futura, última ação não é retirada
+        pend = ult[(~ult["_julg"]) & fut & (~ult["_ret"])]
         st.markdown(f"##### ⏳ Pautados pendentes de julgamento ({len(pend)})")
         if len(pend):
-            tabela(pend.sort_values("data_sessao_iso", ascending=False)[list(cols_sei)]
-                   .rename(columns=cols_sei), datas=["Sessão"], hide_index=True,
-                   use_container_width=True, column_config=lc)
+            tabela(pend.sort_values("_ord")[list(cols_sei)].rename(columns=cols_sei),
+                   datas=["Sessão"], hide_index=True, use_container_width=True,
+                   column_config=lc)
         else:
             st.info("Nenhum processo pautado pendente no momento.")
 
