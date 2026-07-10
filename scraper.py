@@ -21,7 +21,6 @@ import re
 import time
 import html
 import sqlite3
-import unicodedata
 import datetime as dt
 
 import requests
@@ -245,24 +244,14 @@ def cmd_backfill(ini=1, fim=None):
     print(f"[backfill] concluido ({feitos} ids).")
 
 
-def _ascii(texto):
-    """CallMeBot rejeita acentos/emoji — transliteramos para ASCII simples."""
-    t = unicodedata.normalize("NFKD", str(texto))
-    return t.encode("ascii", "ignore").decode("ascii")
-
-
 def notificar_whatsapp(texto):
-    """Envia um WhatsApp via CallMeBot, se as credenciais estiverem no ambiente."""
-    phone = os.environ.get("WHATSAPP_PHONE", "")
-    apikey = os.environ.get("CALLMEBOT_APIKEY", "")
-    if not (phone and apikey):
-        return
+    """Notifica pelo canal unico (notificar.py -> Telegram). Nome mantido por
+    compatibilidade com o restante do script."""
     try:
-        requests.get("https://api.callmebot.com/whatsapp.php",
-                     params={"phone": phone, "text": _ascii(texto), "apikey": apikey},
-                     timeout=30)
+        from notificar import enviar
+        enviar(texto)
     except Exception as e:
-        print(f"  ! falha ao notificar WhatsApp: {e}", file=sys.stderr)
+        print(f"  ! falha ao notificar: {e}", file=sys.stderr)
 
 
 def cmd_atualizar():
