@@ -28,6 +28,7 @@ PAUTAS_DB_PATH = os.environ.get("PAUTAS_DB_PATH", os.path.join(os.path.dirname(o
 NOTICIAS_DB_PATH = os.environ.get("NOTICIAS_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "noticias.db"))
 DECISOES_DB_PATH = os.environ.get("DECISOES_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "decisoes.db"))
 PUBLICACOES_DB_PATH = os.environ.get("PUBLICACOES_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "publicacoes.db"))
+PESSOAL_DB_PATH = os.environ.get("PESSOAL_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pessoal.db"))
 
 st.set_page_config(page_title="Motumbo CVM", page_icon="🏛️", layout="wide")
 
@@ -2932,6 +2933,74 @@ def render_publicacoes():
                        file_name="publicacoes_cvm.csv", mime="text/csv")
 
 
+@st.cache_data(ttl=300)
+def carregar_viagens():
+    """Viagens (afastamentos do país e diárias) extraídas do Boletim de Pessoal."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return None
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM viagens", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+def render_servidores():
+    st.subheader("🏢 Servidores da CVM — Viagens (Boletim de Pessoal)")
+    df = carregar_viagens()
+    if df is None or len(df) == 0:
+        st.info("⏳ A base de viagens do Boletim de Pessoal ainda está sendo montada.")
+        return
+    df = df.copy()
+    df["_ano"] = df["boletim_data_iso"].astype(str).str[:4]
+    st.caption(f"{len(df):,} viagens de {df['servidor_key'].nunique()} servidores "
+               "(fonte: Boletim de Pessoal — Afastamentos do País e Concessões de "
+               "Diárias). Cruzamento com o Portal da Transparência: próxima fase."
+               .replace(",", "."))
+    with st.expander("🔎 Filtros", expanded=True):
+        c1, c2, c3 = st.columns([2, 1, 1])
+        q = c1.text_input("Servidor (nome contém)", key="srv_q")
+        tipos = {"afastamento_pais": "Afastamento do país", "diaria": "Diária"}
+        f_tipo = c2.multiselect("Tipo", list(tipos), format_func=lambda t: tipos[t],
+                                key="srv_tipo")
+        anos = sorted((a for a in df["_ano"].unique() if a and a != "None"),
+                      reverse=True)
+        f_ano = c3.multiselect("Ano", anos, key="srv_ano")
+    m = pd.Series(True, index=df.index)
+    if q.strip():
+        m &= df["servidor_nome"].str.contains(re.escape(q), case=False, na=False)
+    if f_tipo:
+        m &= df["tipo"].isin(f_tipo)
+    if f_ano:
+        m &= df["_ano"].isin(f_ano)
+    res = df[m].copy()
+    # ranking por servidor
+    rk = (res.groupby("servidor_nome").size().rename("Viagens")
+          .reset_index().sort_values("Viagens", ascending=False))
+    c1, c2 = st.columns(2)
+    c1.metric("Viagens encontradas", f"{len(res):,}".replace(",", "."))
+    c2.metric("Servidores", f"{res['servidor_key'].nunique():,}".replace(",", "."))
+    st.markdown("**Servidores que mais viajaram (no filtro):**")
+    st.dataframe(rk.head(20), use_container_width=True, hide_index=True)
+    st.markdown("**Viagens:**")
+    cols = ["boletim_data_iso", "servidor_nome", "tipo", "origem", "destino",
+            "periodo_ini", "periodo_fim", "valor_diarias", "motivo", "link_boletim"]
+    show = res[cols].rename(columns={
+        "boletim_data_iso": "Boletim", "servidor_nome": "Servidor", "tipo": "Tipo",
+        "origem": "Origem", "destino": "Destino", "periodo_ini": "Início",
+        "periodo_fim": "Fim", "valor_diarias": "Diárias (R$)", "motivo": "Motivo",
+        "link_boletim": "Boletim (PDF)"})
+    st.dataframe(
+        show.sort_values("Boletim", ascending=False), use_container_width=True,
+        hide_index=True, height=460,
+        column_config={"Boletim (PDF)": st.column_config.LinkColumn(
+            "Boletim (PDF)", display_text="abrir ↗")})
+    st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="viagens_servidores_cvm.csv", mime="text/csv")
+
+
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
@@ -2939,7 +3008,7 @@ SECOES = ["📊 Painel", "🏛️ Audiências Particulares", "⚖️ Processos S
           "🤝 Termos de Compromisso", "📂 Processos Não-Sancionadores",
           "🗓️ Pautas de Julgamento", "📜 Decisões do Colegiado", "📋 Atas do CGE",
           "📰 Informativos do Colegiado", "👥 Quem é Quem", "🗞️ Notícias",
-          "📑 Publicações (SEI)"]
+          "📑 Publicações (SEI)", "🏢 Servidores"]
 
 
 def main():
@@ -2982,6 +3051,8 @@ def main():
         render_noticias()
     elif sel == SECOES[11]:
         render_publicacoes()
+    elif sel == SECOES[12]:
+        render_servidores()
 
 
 if __name__ == "__main__":
