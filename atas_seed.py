@@ -69,11 +69,20 @@ def _data_de(texto, base):
         r = _fmt(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         if r[0]:
             return r
-    m = re.search(r"(\d{1,2})\s+DE\s+([A-Za-zçÇ]+)\s+DE\s+(\d{4})", texto[:400], re.I)
+    m = re.search(r"(\d{1,2})\s+DE\s+([A-Za-zçÇ]+)\s+DE\s+(\d{4})", texto[:1500], re.I)
     if m:
         mm = MESES.get(m.group(2).lower().replace("ç", "c"), 0)
         if mm:
             r = _fmt(int(m.group(1)), mm, int(m.group(3)))
+            if r[0]:
+                return r
+    # nome do arquivo "DD-monthname" (sem ano) -> completa com o ano do texto
+    mb = re.search(r"(\d{1,2})[-_]+(" + "|".join(MESES) + r")", base, re.I)
+    if mb:
+        mm = MESES.get(mb.group(2).lower().replace("ç", "c"), 0)
+        ya = re.search(r"/(20\d{2})\b", texto) or re.search(r"\b(20\d{2})\b", texto)
+        if mm and ya:
+            r = _fmt(int(mb.group(1)), mm, int(ya.group(1)))
             if r[0]:
                 return r
     m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", texto)  # 1a data dd/mm/aaaa
@@ -86,7 +95,8 @@ def parse_meta(texto, base=""):
     cab = re.sub(r"\s+", " ", texto[:800])
     up = cab.upper()
     numero = ""
-    m = re.search(r"(\d+)\s*[ªa]\s*REUNI", up) or re.search(r"\((\d+)\s*[ªa]\)", cab)
+    m = (re.search(r"(\d+)\s*[ªa]\s*REUNI", up) or re.search(r"\((\d+)\s*[ªa]\)", cab)
+         or re.search(r"CGE\s*\(\s*(\d{1,3})", up))
     if m:
         numero = m.group(1)
     elif base:  # nº da ata pelo nome do arquivo (padrões seguros)
