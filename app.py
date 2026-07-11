@@ -3692,32 +3692,61 @@ def _render_ficha_entidade(k, e):
                      .rename(columns={"data": "Data", "componente": "Área",
                                       "assunto": "Assunto"}).head(40),
                      use_container_width=True, hide_index=True)
-    _bloco_noticias_md("", nomes=[e["nome"]],
+    _bloco_noticias_md("", nomes=e.get("_nomes") or [e["nome"]],
                        titulo="**🗞️ Notícias que citam o nome:**")
+
+
+def _merge_entidades(idx, nomes):
+    """Une várias grafias (variantes) do mesmo nome numa ficha só."""
+    nomes = set(nomes)
+    m = {"nome": " / ".join(sorted(nomes)), "_nomes": sorted(nomes),
+         "acusado": [], "tc": [], "aud": []}
+    for _, e in idx.items():
+        if e["nome"] in nomes:
+            for k in ("acusado", "tc", "aud"):
+                m[k] += e[k]
+    return m
 
 
 def render_busca():
     st.subheader("🔎 Busca global — todas as bases")
     q = st.text_input("Nome, empresa, nº de processo ou tema",
                       key="bg_q", placeholder="ex.: XP Investimentos, 19957.003747/2023-43, insider…")
-    if not q.strip():
-        st.caption("A busca varre processos, acusados, termos, audiências, decisões, "
-                   "atas, pautas, publicações (SEI), notícias, servidores e Quem é Quem.")
-        return
     ql = q.lower().strip()
-    pn_q = _norm_proc(q)
-
-    # 1) Entidades (pessoas/empresas)
     idx = _indice_entidades()
-    hits_ent = [(k, e) for k, e in idx.items() if ql in e["nome"].lower()
-                or ql.upper() in k][:30]
-    if hits_ent:
-        st.markdown(f"#### 👤 Pessoas/Empresas ({len(hits_ent)})")
-        nomes = {e["nome"]: k for k, e in hits_ent}
-        sel = st.selectbox("Ver ficha consolidada de:", list(nomes), key="bg_ent")
-        if sel:
-            _render_ficha_entidade(nomes[sel], idx[nomes[sel]])
+    # Autofill de VARIANTES: digite o nome acima e escolha as grafias que sao a
+    # mesma pessoa/empresa; a busca combina todas (OU) e consolida a ficha.
+    cands = sorted({e["nome"] for k, e in idx.items()
+                    if ql and (ql in e["nome"].lower() or ql.upper() in k)})[:60]
+    variantes = st.multiselect(
+        "🔗 Variantes do nome (autofill) — junte grafias diferentes da mesma "
+        "pessoa/empresa", cands, key="bg_vars",
+        help="Digite o nome no campo acima; aqui aparecem as grafias encontradas. "
+             "Marque todas que forem a mesma entidade — a busca combina tudo.")
+    termos = list(variantes) if variantes else ([q.strip()] if q.strip() else [])
+    if not termos:
+        st.caption("A busca varre processos, acusados, termos, audiências, decisões, "
+                   "atas, pautas, publicações (SEI), notícias, servidores e Quem é Quem. "
+                   "Dica: digite um nome e use o **autofill** para juntar grafias diferentes.")
+        return
+    rgx = "|".join(re.escape(t) for t in termos)
+    pn_q = _norm_proc(q) if q.strip() else ""
+
+    # 1) Entidades (pessoas/empresas) — ficha consolidada
+    if variantes:
+        st.markdown(f"#### 👤 Ficha consolidada ({len(variantes)} grafia(s) unida(s))")
+        _render_ficha_entidade("", _merge_entidades(idx, variantes))
         st.divider()
+    else:
+        hits_ent = [(k, e) for k, e in idx.items() if ql in e["nome"].lower()
+                    or ql.upper() in k][:30]
+        if hits_ent:
+            st.markdown(f"#### 👤 Pessoas/Empresas ({len(hits_ent)})")
+            nomes = {e["nome"]: k for k, e in hits_ent}
+            sel = st.selectbox("Ver ficha consolidada de:", list(nomes), key="bg_ent")
+            if sel:
+                _render_ficha_entidade(nomes[sel], idx[nomes[sel]])
+            st.divider()
 
     def _tab(titulo, df, cols, ren=None, links=None):
         if df is None or not len(df):
@@ -3733,10 +3762,10 @@ def render_busca():
     # 2) Processos sancionadores
     proc, _ = carregar_pas()
     if proc is not None:
-        m = (proc["numero"].str.contains(re.escape(q), case=False, na=False)
-             | proc["objeto"].fillna("").str.contains(re.escape(q), case=False)
-             | proc["ementa"].fillna("").str.contains(re.escape(q), case=False)
-             | proc["acusados"].fillna("").str.contains(re.escape(q), case=False))
+        m = (proc["numero"].str.contains(rgx, case=False, na=False)
+             | proc["objeto"].fillna("").str.contains(rgx, case=False)
+             | proc["ementa"].fillna("").str.contains(rgx, case=False)
+             | proc["acusados"].fillna("").str.contains(rgx, case=False))
         if pn_q:
             m |= proc["numero"].map(_norm_proc) == pn_q
         _tab("⚖️ Processos sancionadores", proc[m],
@@ -3745,8 +3774,8 @@ def render_busca():
     # 3) Termos
     tc = carregar_termos()
     if tc is not None:
-        m = (tc["processo"].str.contains(re.escape(q), case=False, na=False)
-             | tc["partes"].fillna("").str.contains(re.escape(q), case=False))
+        m = (tc["processo"].str.contains(rgx, case=False, na=False)
+             | tc["partes"].fillna("").str.contains(rgx, case=False))
         _tab("🤝 Termos de Compromisso", tc[m],
              ["processo", "situacao", "data_decisao", "partes"],
              {"processo": "Processo", "situacao": "Situação",
@@ -3754,9 +3783,9 @@ def render_busca():
     # 4) Audiências
     aud = carregar()
     if aud is not None:
-        m = (aud["solicitante_nome"].fillna("").str.contains(re.escape(q), case=False)
-             | aud["solicitante_empresa"].fillna("").str.contains(re.escape(q), case=False)
-             | aud["assunto"].fillna("").str.contains(re.escape(q), case=False))
+        m = (aud["solicitante_nome"].fillna("").str.contains(rgx, case=False)
+             | aud["solicitante_empresa"].fillna("").str.contains(rgx, case=False)
+             | aud["assunto"].fillna("").str.contains(rgx, case=False))
         _tab("🏛️ Audiências particulares", aud[m].sort_values("data_iso", ascending=False),
              ["data", "componente", "solicitante_nome", "solicitante_empresa", "assunto"],
              {"data": "Data", "componente": "Área", "solicitante_nome": "Solicitante",
@@ -3765,9 +3794,9 @@ def render_busca():
     dec = carregar_decisoes()
     if dec is not None and len(dec):
         m = (dec.get("descricao", pd.Series("", index=dec.index)).fillna("")
-             .str.contains(re.escape(q), case=False)
+             .str.contains(rgx, case=False)
              | dec.get("ementa", pd.Series("", index=dec.index)).fillna("")
-             .str.contains(re.escape(q), case=False))
+             .str.contains(rgx, case=False))
         _tab("📜 Decisões do Colegiado", dec[m].sort_values("data_iso", ascending=False),
              ["data", "tipo", "ementa", "link"],
              {"data": "Data", "tipo": "Tipo", "ementa": "Ementa", "link": "Link"},
@@ -3775,8 +3804,8 @@ def render_busca():
     # 6) Publicações SEI
     pub = carregar_publicacoes()
     if pub is not None:
-        m = (pub["descricao"].fillna("").str.contains(re.escape(q), case=False)
-             | pub["resumo"].fillna("").str.contains(re.escape(q), case=False))
+        m = (pub["descricao"].fillna("").str.contains(rgx, case=False)
+             | pub["resumo"].fillna("").str.contains(rgx, case=False))
         _tab("📑 Publicações (SEI)", pub[m].sort_values("data_iso", ascending=False),
              ["data", "descricao", "unidade", "link"],
              {"data": "Data", "descricao": "Descrição", "unidade": "Unidade",
@@ -3784,7 +3813,9 @@ def render_busca():
     # 7) Notícias
     nt = carregar_noticias()
     if nt is not None and len(nt):
-        m = nt["titulo"].fillna("").str.contains(re.escape(q), case=False)
+        m = (nt["titulo"].fillna("").str.contains(rgx, case=False)
+             | nt.get("resumo", pd.Series("", index=nt.index)).fillna("")
+             .str.contains(rgx, case=False))
         _tab("🗞️ Notícias", nt[m].sort_values("data_iso", ascending=False),
              ["data", "titulo", "categoria", "url"],
              {"data": "Data", "titulo": "Título", "categoria": "Categoria",
@@ -3792,7 +3823,7 @@ def render_busca():
     # 8) Servidores (viagens)
     vg = carregar_viagens()
     if vg is not None:
-        m = vg["servidor_nome"].fillna("").str.contains(re.escape(q), case=False)
+        m = vg["servidor_nome"].fillna("").str.contains(rgx, case=False)
         _tab("🏢 Servidores — viagens", vg[m].sort_values("boletim_data_iso",
                                                           ascending=False),
              ["servidor_nome", "tipo", "destino", "periodo_ini", "valor_diarias"],
@@ -3801,8 +3832,8 @@ def render_busca():
     # 9) Quem é Quem
     qq = carregar_quem()
     if qq is not None:
-        m = (qq["nome"].fillna("").str.contains(re.escape(q), case=False)
-             | qq["cargo"].fillna("").str.contains(re.escape(q), case=False))
+        m = (qq["nome"].fillna("").str.contains(rgx, case=False)
+             | qq["cargo"].fillna("").str.contains(rgx, case=False))
         _tab("👥 Quem é Quem", qq[m], ["nome", "cargo", "sigla"],
              {"nome": "Nome", "cargo": "Cargo", "sigla": "Sigla"})
 
