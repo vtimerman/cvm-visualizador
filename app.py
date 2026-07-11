@@ -3520,6 +3520,38 @@ def render_servidores():
     if df is None or len(df) == 0:
         st.info("Sem viagens na base ainda.")
         return
+    # Colegiado — fiscalização: dias no cargo × dias viajando, por papel
+    col = _diretores_mandatos()
+    if len(col):
+        st.markdown("**🏛️ Diretores do Colegiado — viagens ao exterior × mandato** "
+                    "*(para fiscalizar o trabalho)*")
+        atuais = col[col["Status"] == "Em exercício"]
+        if len(atuais):
+            tot_d = int(atuais["Dias viajando"].sum())
+            st.caption(f"Membros em exercício: {atuais['Diretor(a)'].nunique()} · "
+                       f"juntos somam **{tot_d} dias** viajando ao exterior.")
+        show_col = col.copy()
+        show_col["% do mandato viajando"] = show_col["% do mandato viajando"].map(
+            lambda x: f"{x:.1f}%")
+        ev = st.dataframe(
+            show_col, use_container_width=True, hide_index=True, height=430,
+            on_select="rerun", selection_mode="single-row", key="col_via_sel",
+            column_config={
+                "Dias úteis (mandato)": st.column_config.NumberColumn(format="%d"),
+                "Dias viajando": st.column_config.NumberColumn(format="%d"),
+                "Custo diárias (R$)": st.column_config.NumberColumn(
+                    format="R$ %.2f")})
+        _abrir_ficha_sel(ev, show_col, "_srv_open_col", "Diretor(a)")
+        st.caption("**Dias úteis (mandato)** = dias de trabalho (seg–sex; feriados "
+                   "não deduzidos); **Dias viajando** = dias corridos de afastamento "
+                   "do país; **% = dias viajando ÷ dias úteis do mandato**. Inclui "
+                   "atuais e ex-diretores. Otto e Accioly têm o mandato separado em "
+                   "**Diretor** e **Presidência (interina)** — dos atos formais do "
+                   "Boletim somados ao período contínuo desde a renúncia de João "
+                   "Pedro (08/2025). **Custo = diárias nacionais** (afastamentos "
+                   "internacionais não trazem valor no Boletim — virá do Portal da "
+                   "Transparência). Clique para a ficha. ⚠️ estimado dos boletins.")
+        st.divider()
     df = df.copy()
     df["_ano"] = df["boletim_data_iso"].astype(str).str[:4]
     st.caption(f"{len(df):,} viagens de {df['servidor_key'].nunique()} servidores "
@@ -3543,14 +3575,28 @@ def render_servidores():
     if f_ano:
         m &= df["_ano"].isin(f_ano)
     res = df[m].copy()
-    # ranking por servidor
-    rk = (res.groupby("servidor_nome").size().rename("Viagens")
-          .reset_index().sort_values("Viagens", ascending=False))
-    c1, c2 = st.columns(2)
+    res["_val"] = res["valor_diarias"].map(_parse_valor)
+    res["_dias"] = res.apply(
+        lambda r: _dias_periodo(r["periodo_ini"])
+        if r["tipo"] == "afastamento_pais" else 0, axis=1)
+    # ranking por servidor: viagens, dias viajando (exterior) e custo de diárias
+    rk = (res.groupby("servidor_nome").agg(
+        Viagens=("servidor_nome", "size"),
+        **{"Dias viajando (exterior)": ("_dias", "sum"),
+           "Custo diárias (R$)": ("_val", "sum")})
+        .reset_index().sort_values("Custo diárias (R$)", ascending=False))
+    c1, c2, c3 = st.columns(3)
     c1.metric("Viagens encontradas", f"{len(res):,}".replace(",", "."))
     c2.metric("Servidores", f"{res['servidor_key'].nunique():,}".replace(",", "."))
-    st.markdown("**Servidores que mais viajaram (no filtro):**")
-    st.dataframe(rk.head(20), use_container_width=True, hide_index=True)
+    c3.metric("💰 Custo diárias (R$)",
+              f"{res['_val'].sum():,.0f}".replace(",", "."))
+    st.markdown("**Servidores por custo de diárias / viagens (no filtro):**")
+    st.dataframe(rk.head(30), use_container_width=True, hide_index=True,
+                 column_config={"Custo diárias (R$)": st.column_config.NumberColumn(
+                     format="R$ %.2f")})
+    st.caption("Custo = diárias (viagens nacionais). Afastamentos internacionais "
+               "não trazem valor no Boletim — o custo virá do Portal da "
+               "Transparência.")
     st.markdown("**Viagens:**")
     cols = ["boletim_data_iso", "servidor_nome", "tipo", "origem", "destino",
             "periodo_ini", "periodo_fim", "valor_diarias", "motivo", "link_boletim"]
@@ -4814,12 +4860,216 @@ def _diretor_boletim(d):
         exo_after = [e for e in exos if e >= noms[-1]]
         ativo = not exo_after
         end = exo_after[0] if exo_after else dt.date.today().isoformat()
-        try:
-            dias = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
-        except ValueError:
-            dias = 0
-        mand = {"start": start, "end": end, "ativo": ativo, "dias": dias}
+        mand = {"start": start, "end": end, "ativo": ativo,
+                "dias": _busdays(start, end)}
     return mand, len(pers), sum(_dias_periodo(p) for p in pers)
+
+
+def _pk_nome(n):
+    """Chave de pessoa (1º + último token), robusta a variantes de grafia."""
+    toks = [t for t in _ent_key(n).split() if len(t) > 2]
+    return (toks[0], toks[-1]) if len(toks) >= 2 else tuple(toks)
+
+
+def _parse_valor(s):
+    s = str(s or "").strip()
+    if not s:
+        return 0.0
+    try:
+        return float(s.replace(".", "").replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def _periodo_datas(t):
+    """(início, fim) ISO de um período textual, ou (None, None)."""
+    m = re.search(r"(\d{1,2})(?:\s+de\s+([a-zç]+))?(?:\s+de\s+(\d{4}))?\s+a\s+"
+                  r"(\d{1,2})\s+de\s+([a-zç]+)\s+de\s+(\d{4})",
+                  str(t or "").lower())
+    if not m:
+        return (None, None)
+    try:
+        d1, m1, a1, d2, m2, a2 = m.groups()
+        mo2 = _MESES_PT.get(m2)
+        mo1 = _MESES_PT.get(m1) if m1 else mo2
+        y1 = int(a1) if a1 else int(a2)
+        if not (mo1 and mo2):
+            return (None, None)
+        return (dt.date(y1, mo1, int(d1)).isoformat(),
+                dt.date(int(a2), mo2, int(d2)).isoformat())
+    except (ValueError, TypeError):
+        return (None, None)
+
+
+def _busdays(ini, fim):
+    """Dias úteis (seg–sex) em [ini, fim] inclusive. Feriados não deduzidos."""
+    try:
+        d0 = dt.date.fromisoformat(str(ini)[:10])
+        d1 = dt.date.fromisoformat(str(fim)[:10])
+    except (ValueError, TypeError):
+        return 0
+    if d1 < d0:
+        return 0
+    total = (d1 - d0).days + 1
+    semanas, extra = divmod(total, 7)
+    bd = semanas * 5
+    wd = d0.weekday()
+    for i in range(extra):
+        if (wd + i) % 7 < 5:
+            bd += 1
+    return bd
+
+
+def _uteis_periodo(t):
+    """Dias úteis de um período de viagem textual ('02 a 06 de março de 2026')."""
+    ini, fim = _periodo_datas(t)
+    return _busdays(ini, fim) if ini and fim else 0
+
+
+@st.cache_data(ttl=300)
+def _interino_periodos():
+    """Períodos em que cada diretor exerceu a Presidência interinamente, do
+    Boletim: (a) atos formais 'designado para responder pela/exercer a
+    Presidência ... no período de X a Y'; (b) o contínuo após a vacância
+    (renúncia do presidente), atribuído a quem assina como Presidente Interino."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return {}
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    per = {}
+    VERBO = re.compile(r"designad[oa]\s+para\s+(?:responder pela|exercer[, ]+"
+                       r"(?:interinamente[, ]+)?a)\s+Presid[eê]ncia", re.I)
+    NAMEBEF = re.compile(r"([A-ZÀ-Ú][A-ZÀ-Ú'’ ]{8,55})[, ]+"
+                         r"(?:Diretor[a]?,?\s*)?$")
+    PERRE = re.compile(r"no per[ií]odo de\s+(.*?)(?:,?\s*inclusive|,\s*com|,\s*por "
+                       r"motivo|\.|;|conforme|\()", re.I)
+    for (texto,) in con.execute("SELECT texto FROM boletins WHERE texto LIKE "
+                                "'%designad%Presid%' AND data_iso<>''"):
+        flat = re.sub(r"\s+", " ", texto)
+        for m in VERBO.finditer(flat):
+            nm = NAMEBEF.search(flat[max(0, m.start() - 70):m.start()].strip() + " ")
+            if not nm:
+                continue
+            nome = re.sub(r".*SUBSTITU\w+\s*", "", nm.group(1).strip(), flags=re.I)
+            pm = PERRE.search(flat[m.end():m.end() + 170])
+            if not pm:
+                continue
+            ini, fim = _periodo_datas(pm.group(1))
+            if ini and fim:
+                per.setdefault(_pk_nome(nome), []).append((ini, fim))
+    vac = con.execute("SELECT MAX(boletim_data_iso) FROM movimentos WHERE "
+                      "tipo='exoneracao' AND funcao LIKE '%Presidente%' AND "
+                      "funcao NOT LIKE '%Interino%'").fetchone()[0]
+    if vac:
+        hoje = dt.date.today().isoformat()
+        for (texto,) in con.execute("SELECT texto FROM boletins WHERE data_iso>=? "
+                                    "AND texto<>''", (vac,)):
+            for m in re.finditer(r"[Aa]ssinad[oa][^.\n]{0,40}por\s+([A-ZÀ-Ú]"
+                                 r"[A-ZÀ-Ú ]{6,55}?)\s+Presidente Interino\b", texto):
+                per.setdefault(_pk_nome(m.group(1)), []).append((vac, hoje))
+    con.close()
+    out = {}
+    for k, lst in per.items():
+        merged = []
+        for ini, fim in sorted(set(lst)):
+            if merged and ini <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], fim))
+            else:
+                merged.append((ini, fim))
+        out[k] = merged
+    return out
+
+
+@st.cache_data(ttl=300)
+def _diretores_mandatos():
+    """TODOS os diretores/presidentes (atuais + ex), com o mandato segmentado
+    por papel (Diretor × Presidência interina) a partir dos atos do Boletim.
+    Dias no cargo × dias viajando × custo de diárias por fase, p/ fiscalização."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return pd.DataFrame()
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    try:
+        stat = con.execute(
+            "SELECT tipo, servidor_nome, boletim_data_iso, funcao FROM movimentos "
+            "WHERE (funcao LIKE '%Diretor%' OR funcao LIKE '%Presidente%') AND "
+            "boletim_data_iso<>'' ORDER BY boletim_data_iso").fetchall()
+        nomes_vg = [r[0] for r in con.execute(
+            "SELECT DISTINCT servidor_nome FROM viagens")]
+    except Exception:
+        con.close()
+        return pd.DataFrame()
+    hoje = dt.date.today()
+    interinos = _interino_periodos()
+    pessoas = {}
+    for t, nome, data, fun in stat:
+        p = pessoas.setdefault(_pk_nome(nome),
+                               {"nome": nome, "noms": [], "exos": [], "pres": False})
+        if len(nome) > len(p["nome"]):
+            p["nome"] = nome
+        (p["noms"] if t == "nomeacao" else p["exos"]).append(data)
+        if "presidente" in fun.lower():
+            p["pres"] = True
+    recs = []
+    for k, p in pessoas.items():
+        if not p["noms"]:
+            continue
+        inicio, last_nom = min(p["noms"]), max(p["noms"])
+        exo = [e for e in p["exos"] if e >= last_nom]
+        if exo:
+            fim, status = min(exo), "Ex-diretor(a)"
+        elif (hoje - dt.date.fromisoformat(inicio)).days > 5.6 * 365:
+            fim = (dt.date.fromisoformat(inicio)
+                   + dt.timedelta(days=int(5 * 365.25))).isoformat()
+            status = "Ex-diretor(a) (fim estimado)"
+        else:
+            fim, status = hoje.isoformat(), "Em exercício"
+        toks = [t for t in _ent_key(p["nome"]).split() if len(t) > 2]
+        skeys = sorted({_ent_key(n) for n in nomes_vg
+                        if all(t in _ent_key(n) for t in toks)})
+        vg = []
+        if skeys:
+            ph = ",".join("?" * len(skeys))
+            vg = con.execute(
+                f"SELECT tipo, periodo_ini, boletim_data_iso, valor_diarias FROM "
+                f"viagens WHERE servidor_key IN ({ph})", skeys).fetchall()
+        mine = []
+        for a, b in interinos.get(k, []):
+            a2, b2 = max(a, inicio), min(b, fim)
+            if a2 < b2:
+                mine.append((a2, b2))
+        inter_bdays = sum(_busdays(a, b) for a, b in mine)
+        total_bdays = _busdays(inicio, fim)
+
+        def bloco(papel, ini_lbl, bdias, dentro):
+            sub = [x for x in vg if dentro(x[2] or "")]
+            dv = sum(_dias_periodo(x[1]) for x in sub
+                     if x[0] == "afastamento_pais")
+            nv = sum(1 for x in sub if x[0] == "afastamento_pais")
+            custo = sum(_parse_valor(x[3]) for x in sub)
+            return {"Diretor(a)": p["nome"].title(), "Papel": papel,
+                    "Início": ini_lbl, "Dias úteis (mandato)": bdias, "Viagens": nv,
+                    "Dias viajando": dv,
+                    "% do mandato viajando":
+                    round(100 * dv / bdias, 1) if bdias else 0.0,
+                    "Custo diárias (R$)": round(custo, 2), "Status": status}
+
+        def in_i(d):
+            return any(a <= d <= b for a, b in mine)
+
+        if mine and inter_bdays > 0:
+            recs.append(bloco("Diretor(a)", inicio, total_bdays - inter_bdays,
+                              lambda d: not in_i(d)))
+            recs.append(bloco("Presidência (interina)", min(a for a, _ in mine),
+                              inter_bdays, in_i))
+        else:
+            recs.append(bloco("Presidente" if p["pres"] else "Diretor(a)",
+                              inicio, total_bdays, lambda d: True))
+    con.close()
+    if not recs:
+        return pd.DataFrame()
+    df = pd.DataFrame(recs)
+    df["_ord"] = df["Status"].map({"Em exercício": 0}).fillna(1)
+    return df.sort_values(["_ord", "Dias viajando"],
+                          ascending=[True, False]).drop(columns="_ord")
 
 
 def render_ficha_diretor():
@@ -4906,10 +5156,12 @@ def render_ficha_diretor():
                     "*(cruzado com o Boletim de Pessoal)*")
         m1, m2, m3, m4 = st.columns(4)
         if mand:
-            anos = mand["dias"] / 365.25
+            anos = (dt.date.fromisoformat(mand["end"])
+                    - dt.date.fromisoformat(mand["start"])).days / 365.25
             situ = ("em exercício" if mand["ativo"] else f"até {mand['end']}")
             m1.metric("🗓️ Tempo de mandato", f"{anos:.1f} anos",
-                      help=f"Início {mand['start']} · {situ}")
+                      help=f"Início {mand['start']} · {situ} · "
+                      f"{mand['dias']} dias úteis")
         else:
             m1.metric("🗓️ Tempo de mandato", "—")
         m2.metric("✈️ Viagens ao exterior", n_vi)
@@ -4917,9 +5169,10 @@ def render_ficha_diretor():
         if mand and mand["dias"] > 0:
             m4.metric("📊 % do mandato viajando",
                       f"{100 * dias_vi / mand['dias']:.1f}%")
-        st.caption("Mandato = da nomeação estatutária à exoneração (ou hoje, se em "
-                   "exercício). Dias viajando = soma dos períodos de afastamento do "
-                   "país. Ambos dependem do que consta nos boletins.")
+        st.caption("Tempo de mandato em **dias úteis** (trabalho, seg–sex; feriados "
+                   "não deduzidos); **dias viajando em dias corridos** (afastamentos "
+                   "do país); % = dias viajando ÷ dias úteis do mandato. Depende do "
+                   "que consta nos boletins.")
     st.divider()
     # ---- quem ele julga (parametrização por réu) + severidade -------------
     cA, cB = st.columns(2)
