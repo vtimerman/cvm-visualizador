@@ -3444,6 +3444,38 @@ def _teses_html(pn, e):
             f'<table>{blocos}</table>')
 
 
+@st.cache_data(ttl=600)
+def _tema_timeline(tema):
+    """Linha do tempo dos julgados de um tema (data, relator, severidade,
+    desfecho) — para VER a evolução do entendimento ao longo dos anos."""
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return pd.DataFrame()
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT ct.proc_norm, e.data_iso, e.diretor, e.valor, "
+            "a.analise FROM caso_tema ct JOIN eventos e ON "
+            "e.proc_norm=ct.proc_norm AND e.evento='julgou' LEFT JOIN analises a "
+            "ON a.proc_norm=ct.proc_norm AND a.tipo='julgado' WHERE ct.tema=? "
+            "AND ct.dominante=1 AND e.data_iso<>''", (tema,)).fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    out = []
+    for pn, di, dire, val, an in rows:
+        try:
+            d = json.loads(an) if an else {}
+        except (ValueError, TypeError):
+            d = {}
+        out.append({"Data": di, "Ano": di[:4], "Relator": dire, "Processo": pn,
+                    "Multa (R$)": val or 0,
+                    "Severidade": str(d.get("severidade") or "?").lower()
+                    .replace("média", "media"),
+                    "Desfecho": str(d.get("desfecho") or "")[:140]})
+    df = pd.DataFrame(out)
+    return df.sort_values("Data") if len(df) else df
+
+
 def render_agentes_tese():
     st.markdown("#### 🧠 Agentes especialistas por tese")
     ags, casos = _agentes_tese()
@@ -3473,8 +3505,28 @@ def render_agentes_tese():
                         index=None, placeholder="escolha um tema…")
     if tema:
         a = ags[tema]
-        for rot, campo in [("Tese vigente", "tese_vigente"),
-                           ("Evolução", "evolucao"), ("Dosimetria", "dosimetria"),
+        tv = str(a.get("tese_vigente") or "").strip()
+        if tv and tv != "-":
+            st.success(f"**⚖️ Tese vigente:** {tv}")
+        ev_txt = str(a.get("evolucao") or "").strip()
+        if ev_txt and ev_txt != "-":
+            st.warning(f"**📈 Como o entendimento mudou:** {ev_txt}")
+        # linha do tempo: VER a mudança ao longo dos anos
+        tl = _tema_timeline(tema)
+        if len(tl) >= 2:
+            st.markdown("**📈 Evolução ao longo do tempo** — severidade dos "
+                        "julgados por ano (endurecimento/abrandamento):")
+            piv = pd.crosstab(tl["Ano"], tl["Severidade"])
+            ordem = [c for c in ["alta", "media", "baixa", "?"] if c in piv.columns]
+            st.bar_chart(piv[ordem + [c for c in piv.columns if c not in ordem]])
+            with st.expander(f"🕰️ Linha do tempo dos {len(tl)} julgados do tema"):
+                st.dataframe(tl[["Data", "Relator", "Severidade", "Multa (R$)",
+                                 "Desfecho"]], use_container_width=True,
+                             hide_index=True)
+            st.caption("⚠️ Cobertura atual: 2022–2026 (análises IA). A varredura da "
+                       "jurisprudência completa (1999–2025) trará a evolução "
+                       "histórica das teses e **quem** as mudou.")
+        for rot, campo in [("Dosimetria", "dosimetria"),
                            ("Posição por diretor", "posicao_por_diretor"),
                            ("Padrão de TC", "tc_padrao")]:
             v = str(a.get(campo) or "").strip()
