@@ -3723,6 +3723,7 @@ def render_busca():
         if df is None or not len(df):
             return
         st.markdown(f"#### {titulo} ({len(df)})")
+        cols = [c for c in cols if c in df.columns]   # robusto a schema drift
         show = df[cols].rename(columns=ren or {})
         cc = {c: st.column_config.LinkColumn(c, display_text="abrir ↗")
               for c in (links or [])}
@@ -3762,9 +3763,11 @@ def render_busca():
               "solicitante_empresa": "Empresa", "assunto": "Assunto"})
     # 5) Decisões do Colegiado
     dec = carregar_decisoes()
-    if dec is not None:
-        m = (dec["titulo"].fillna("").str.contains(re.escape(q), case=False)
-             | dec["ementa"].fillna("").str.contains(re.escape(q), case=False))
+    if dec is not None and len(dec):
+        m = (dec.get("descricao", pd.Series("", index=dec.index)).fillna("")
+             .str.contains(re.escape(q), case=False)
+             | dec.get("ementa", pd.Series("", index=dec.index)).fillna("")
+             .str.contains(re.escape(q), case=False))
         _tab("📜 Decisões do Colegiado", dec[m].sort_values("data_iso", ascending=False),
              ["data", "tipo", "ementa", "link"],
              {"data": "Data", "tipo": "Tipo", "ementa": "Ementa", "link": "Link"},
