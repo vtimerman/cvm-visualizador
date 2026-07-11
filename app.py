@@ -4084,7 +4084,48 @@ def render_ficha_diretor():
         return
     ev, pz, perfil, dossie, ana = _dados_ficha_diretor(d)
     julgs = ev[ev["evento"] == "julgou"].copy()
-    # ---- métricas de cabeçalho -------------------------------------------
+    # ---- PERFIL DO AGENTE (o que o agente é) ------------------------------
+    st.markdown(f"## 🤖 {d}")
+    if dossie:
+        with st.container(border=True):
+            st.markdown("##### 🧬 Perfil do agente")
+            st.caption("Este é o perfil que **define o agente de IA** deste diretor "
+                       "— o mesmo conhecimento que ele usa ao ser consultado sobre "
+                       "um caso. As métricas e gráficos abaixo são a evidência.")
+            pr = str(dossie.get("perfil_resumido") or "").strip()
+            if pr and pr != "-":
+                st.markdown(pr)
+            for rot, campo in [("⚖️ Padrão decisório", "padrao_decisorio"),
+                               ("💰 Dosimetria", "severidade_dosimetria"),
+                               ("🎯 Perfil dos réus", "perfil_dos_reus"),
+                               ("📚 Temas recorrentes", "temas_recorrentes"),
+                               ("🗳️ Divergências e vistas", "divergencias_e_vistas"),
+                               ("⏱️ Prazos e pautas", "prazos_e_pautas")]:
+                v = dossie.get(campo)
+                if isinstance(v, list):
+                    v = " · ".join(str(x) for x in v)
+                v = str(v or "").strip()
+                if v and v != "-":
+                    st.markdown(f"**{rot}:** {v}")
+            inc = dossie.get("incoerencias") or []
+            if inc:
+                st.markdown("**⚠️ Incoerências (hipóteses a verificar):**")
+                for c in (inc if isinstance(inc, list) else [inc]):
+                    st.markdown(f"- {c}")
+            ck = dossie.get("casos_marcantes") or []
+            if ck:
+                st.markdown("**Casos marcantes:** " + " · ".join(str(x) for x in ck))
+            sp = str(dossie.get("system_prompt") or "").strip()
+            if sp:
+                st.markdown("🤖 **Este perfil É o agente.** Copie o *system prompt* "
+                            "abaixo e cole numa conversa (comigo ou em qualquer LLM) "
+                            "para consultá-lo sobre um caso concreto.")
+                with st.expander("📋 System prompt do agente (copiar)"):
+                    st.code(sp, language=None)
+    else:
+        st.info("O dossiê/agente deste diretor ainda não foi gerado.")
+    st.divider()
+    # ---- métricas de cabeçalho (evidência) -------------------------------
     pj = pz[pz["situacao"] == "julgado"].dropna(subset=["dias"])
     est = pz[pz["situacao"] == "em estoque"]
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -4181,27 +4222,6 @@ def render_ficha_diretor():
                 st.dataframe(casos[["data_iso", "diretor_a", "tipo",
                                     "diretor_b", "processo", "trecho"]],
                              use_container_width=True, hide_index=True)
-    # ---- dossiê ------------------------------------------------------------
-    if dossie:
-        st.divider()
-        st.markdown("**🤖 Dossiê (IA):**")
-        for rot, campo in [("Perfil", "perfil_resumido"),
-                           ("Padrão decisório", "padrao_decisorio"),
-                           ("Dosimetria", "severidade_dosimetria"),
-                           ("Perfil dos réus", "perfil_dos_reus"),
-                           ("Incoerências detectadas", "incoerencias"),
-                           ("Prazos e pautas", "prazos_e_pautas")]:
-            v = dossie.get(campo)
-            if isinstance(v, list):
-                v = " · ".join(str(x) for x in v)
-            if v and str(v).strip() not in ("", "-"):
-                st.markdown(f"- **{rot}:** {v}")
-        sp = str(dossie.get("system_prompt") or "").strip()
-        if sp:
-            with st.expander("🤖 System prompt do agente (copiar)"):
-                st.code(sp, language=None)
-
-
 def render_colegiado():
     st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
     visao = st.segmented_control(
