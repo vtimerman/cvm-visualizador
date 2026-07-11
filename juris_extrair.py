@@ -155,6 +155,43 @@ def aplicar_ia(caminho):
     print(f"[juris] {n} analise(s) e {nt} tese(s) aplicadas.")
 
 
+def exportar_conduta():
+    """Backporta as analises da Fase B (juris.db, LOCAL) para a conduta.db
+    (versionada), na tabela juris_analise, para o app AGREGAR as fontes e
+    entregar a melhor informacao possivel de cada processo. Mantem, por
+    processo, o documento com a analise mais completa (votos+area)."""
+    cond = os.path.join(DIR, "conduta.db")
+    if not os.path.exists(cond):
+        print("[juris] conduta.db nao encontrada; nada a exportar.")
+        return
+    con = conectar()
+    rows = con.execute(
+        "SELECT proc_norm, resultado, area_tecnica, votos, teses, resumo, "
+        "data_julg, relator FROM doc_analises WHERE ai_feito=1 AND proc_norm<>''"
+    ).fetchall()
+    con.close()
+    cc = sqlite3.connect(cond)
+    cc.execute("""CREATE TABLE IF NOT EXISTS juris_analise(
+        proc_norm TEXT PRIMARY KEY, resultado TEXT, area_tecnica TEXT,
+        votos TEXT, teses TEXT, resumo TEXT, data_julg TEXT, relator TEXT,
+        atualizado_em TEXT)""")
+    hoje = dt.date.today().isoformat()
+    n = 0
+    for pn, res, area, vot, tes, resu, dj, rel in rows:
+        score = len(vot or "") + len(area or "") + len(res or "")
+        cur = cc.execute("SELECT COALESCE(LENGTH(votos),0)+COALESCE(LENGTH("
+                         "area_tecnica),0)+COALESCE(LENGTH(resultado),0) FROM "
+                         "juris_analise WHERE proc_norm=?", (pn,)).fetchone()
+        if cur and cur[0] >= score:
+            continue
+        cc.execute("INSERT OR REPLACE INTO juris_analise VALUES(?,?,?,?,?,?,?,?,?)",
+                   (pn, res, area, vot, tes, resu, dj, rel, hoje))
+        n += 1
+    cc.commit()
+    cc.close()
+    print(f"[juris] exportadas {n} analises -> conduta.db::juris_analise")
+
+
 def pendentes_lista(n=15):
     """Lista de arquivos legiveis ainda nao analisados (p/ lotes)."""
     con = conectar()
@@ -192,5 +229,7 @@ if __name__ == "__main__":
         aplicar_ia(sys.argv[2])
     elif cmd == "pendentes":
         pendentes_lista(sys.argv[2] if len(sys.argv) > 2 else 15)
+    elif cmd == "exportar_conduta":
+        exportar_conduta()
     else:
         stats()

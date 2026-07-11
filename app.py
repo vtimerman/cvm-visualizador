@@ -3195,6 +3195,26 @@ def _ocupacao_atual(mov):
                & ult["funcao"].astype(bool)].copy()
 
 
+def _superintendentes_atuais(mov):
+    """Titular mais recente da função de Superintendente em cada unidade (o
+    superintendente de cada área). Exclui adjuntos/substitutos."""
+    if mov is None or not len(mov):
+        return pd.DataFrame()
+    sup = mov[mov["funcao"].str.match(r"(?i)\s*Superintendente", na=False)
+              & ~mov["funcao"].str.contains(r"(?i)adjunt|substitut", na=False)
+              & mov["tipo"].isin(["designacao", "nomeacao"])
+              & (mov["sigla"] != "")]
+    if not len(sup):
+        return pd.DataFrame()
+    # titular mais recente por área…
+    sup = sup.sort_values("boletim_data_iso").groupby(
+        "sigla", as_index=False).tail(1)
+    # …e cada pessoa em UMA só área (a mais recente): remove entradas obsoletas
+    # de quem depois assumiu outra superintendência.
+    return sup.sort_values("boletim_data_iso").groupby(
+        "servidor_key", as_index=False).tail(1)
+
+
 @st.dialog("🗂️ Ficha do servidor", width="large")
 def dialog_servidor(nome):
     """Ficha individual completa do servidor (aberta ao clicar no nome)."""
@@ -3231,6 +3251,24 @@ def render_organograma():
     c4.metric("🏢 Unidades", nsig)
     st.caption("👉 **Clique em qualquer servidor** para abrir a ficha individual "
                "(trajetória de cargos, viagens, boletins e menções no Diário).")
+    # headline: superintendentes das areas (atuais)
+    sup = _superintendentes_atuais(mov)
+    if len(sup):
+        st.markdown("##### 🎖️ Superintendentes das áreas (atuais)")
+        supd = sup.sort_values("sigla")[
+            ["sigla", "unidade", "servidor_nome", "codigo",
+             "boletim_data_iso"]].rename(columns={
+                 "sigla": "Sigla", "unidade": "Superintendência",
+                 "servidor_nome": "Superintendente", "codigo": "Código",
+                 "boletim_data_iso": "Desde (boletim)"})
+        evs = st.dataframe(supd, use_container_width=True, hide_index=True,
+                           height=min(430, 45 + 35 * len(supd)), on_select="rerun",
+                           selection_mode="single-row", key="org_sup_sel")
+        _abrir_ficha_sel(evs, supd, "_srv_open_sup", "Superintendente")
+        st.caption(f"{len(supd)} unidades — titular mais recente da função de "
+                   "Superintendente em cada área. Clique para a ficha. ⚠️ estimado "
+                   "a partir dos boletins.")
+        st.divider()
     sub = st.radio("Ver", ["Quadro atual (por servidor)",
                            "Histórico de movimentos"], horizontal=True,
                    key="org_sub", label_visibility="collapsed")
@@ -4377,8 +4415,35 @@ def _conduta_analise_do_proc(pn):
             "SELECT tema FROM caso_tema WHERE proc_norm=? AND dominante=1", (pn,))]
     except Exception:
         pass
+    # AGREGAÇÃO: análise do inteiro teor (jurisprudência) quando disponível
+    try:
+        jr = con.execute(
+            "SELECT resultado, area_tecnica, votos, teses, resumo, relator, "
+            "data_julg FROM juris_analise WHERE proc_norm=?", (pn,)).fetchone()
+        if jr:
+            try:
+                teses = json.loads(jr[3]) if jr[3] else []
+            except (ValueError, TypeError):
+                teses = []
+            out["juris"] = {"resultado": jr[0], "area_tecnica": jr[1],
+                            "votos": jr[2], "teses": teses, "resumo": jr[4],
+                            "relator": jr[5], "data": jr[6]}
+            # completa metadados vazios com a melhor fonte
+            if not out.get("relator") and jr[5]:
+                out["relator"] = jr[5]
+            if not out.get("data") and jr[6]:
+                out["data"] = jr[6]
+    except Exception:
+        pass
     con.close()
     return out
+
+
+def _melhor(*vals):
+    """Melhor valor entre fontes: o primeiro não-vazio e mais informativo."""
+    cands = [str(v).strip() for v in vals if v and str(v).strip()
+             and str(v).strip() != "-"]
+    return max(cands, key=len) if cands else ""
 
 
 @st.dialog("Análise do caso (IA)", width="large")
@@ -4411,19 +4476,48 @@ def dialog_conduta_analise(pn):
         cor = {"alta": "🔴", "media": "🟠", "média": "🟠",
                "baixa": "🟢"}.get(sev.lower(), "⚪")
         st.markdown(f"**Severidade (IA):** {cor} `{sev}`")
-    if not a:
-        st.info("A análise de IA deste processo ainda não está disponível na "
-                "base de conduta.")
-    for rot, campo in [("Resumo", "resumo"), ("Conduta imputada", "conduta_imputada"),
-                       ("Desfecho", "desfecho"), ("Racional da decisão", "racional"),
+    jr = dd.get("juris") or {}
+    if not a and not jr:
+        st.info("A análise deste processo ainda não está disponível nas bases.")
+    resumo = _melhor(a.get("resumo"), jr.get("resumo"))
+    if resumo:
+        st.markdown("**Resumo:**")
+        st.write(resumo)
+    cond = str(a.get("conduta_imputada") or "").strip()
+    if cond and cond != "-":
+        st.markdown("**Conduta imputada:**")
+        st.write(cond)
+    if jr.get("area_tecnica"):
+        st.markdown("**Área técnica / acusação:**")
+        st.write(str(jr["area_tecnica"]).strip())
+    resultado = _melhor(jr.get("resultado"), a.get("desfecho"))
+    if resultado:
+        st.markdown("**Resultado / desfecho:**")
+        st.write(resultado)
+    if jr.get("votos"):
+        st.markdown("**🗳️ Votação:**")
+        st.write(str(jr["votos"]).strip().strip('"'))
+    for rot, campo in [("Racional da decisão", "racional"),
                        ("Conduta do relator", "conduta_relator")]:
         v = str(a.get(campo) or "").strip()
         if v and v != "-":
             st.markdown(f"**{rot}:**")
             st.write(v)
+    if jr.get("teses"):
+        st.markdown("**⚖️ Teses do julgado:**")
+        for t in jr["teses"]:
+            tm = _TEMA_LABEL.get(t.get("tema", ""), t.get("tema", ""))
+            te = str(t.get("tese") or "").strip()
+            if te:
+                st.markdown(f"- *{tm}:* {te}")
     temas = [t for t in dd.get("temas", []) if t and t != "outros"]
     if temas:
         st.caption("Temas: " + ", ".join(_TEMA_LABEL.get(t, t) for t in temas))
+    fontes = (["análise de conduta"] if a else []) + \
+             (["inteiro teor da jurisprudência"] if jr else [])
+    if fontes:
+        st.caption("🔗 Fontes agregadas: " + " + ".join(fontes)
+                   + ". Confira sempre no inteiro teor.")
     pubs = _pubs_do_processo(pn)
     if pubs:
         st.markdown(f"**📑 Publicações no Diário (SEI) ({len(pubs)}):**")
@@ -4490,6 +4584,242 @@ def _inconsistencias_diretor(d):
             if tema != "outros" and len(g) >= 2 and {"alta", "baixa"} <= sevs:
                 clusters.append((tema, g.sort_values("Severidade")))
     return df, clusters
+
+
+def _parse_trecho_div(t):
+    """Quebra o trecho didático (ASSUNTO/RELATOR/DECISAO/VOTOS) em seções."""
+    out = {}
+    t = str(t or "")
+    for key in ["ASSUNTO", "RELATOR", "DECISAO", "VOTOS"]:
+        m = re.search(key + r":\s*(.*?)(?=\s*(?:ASSUNTO|RELATOR|DECISAO|VOTOS):|$)",
+                      t, re.S)
+        if m and m.group(1).strip():
+            out[key] = m.group(1).strip()
+    return out
+
+
+@st.dialog("⚖️ Divergência no Colegiado", width="large")
+def dialog_divergencia(row):
+    """Ficha didática de uma divergência: o que se discutia, o que o Colegiado
+    decidiu e como cada diretor votou (aberta ao clicar na divergência)."""
+    a = row.get("diretor_a", "")
+    b = row.get("diretor_b", "")
+    proc = str(row.get("processo") or "").strip() or "—"
+    data = str(row.get("data_iso") or "")
+    tipo = row.get("tipo")
+    st.markdown(f"### Processo {proc}")
+    if data:
+        st.caption(f"Sessão de julgamento em {data}")
+    if tipo == "divergiu_de":
+        st.warning(f"🗳️ **{a}** divergiu e ficou **vencido(a)**; prevaleceu a "
+                   f"posição de **{b}**.")
+    else:
+        st.info(f"👁️ **{a}** pediu vista sobre a relatoria de **{b}**.")
+    secoes = _parse_trecho_div(row.get("trecho"))
+    rotulos = [("ASSUNTO", "📌 O que se discutia"),
+               ("RELATOR", "👤 Relatoria"),
+               ("DECISAO", "⚖️ O que o Colegiado decidiu"),
+               ("VOTOS", "🗳️ Como votaram — a divergência")]
+    if secoes:
+        for key, label in rotulos:
+            if secoes.get(key):
+                st.markdown(f"**{label}:**")
+                st.write(secoes[key])
+    else:
+        st.write(str(row.get("trecho") or "—"))
+    dd = _conduta_analise_do_proc(proc)
+    temas = [t for t in dd.get("temas", []) if t and t != "outros"]
+    if temas:
+        st.caption("Tema: " + ", ".join(_TEMA_LABEL.get(t, t) for t in temas))
+    rac = str((dd.get("analise") or {}).get("racional") or "").strip()
+    if rac and rac != "-":
+        st.markdown("**🧠 Racional da decisão (análise IA):**")
+        st.write(rac)
+    pubs = _pubs_do_processo(proc)
+    if pubs:
+        st.markdown(f"**📑 Publicações no Diário (SEI) ({len(pubs)}):**")
+        tp = pd.DataFrame([{"Data": p["data"], "Tipo": p["tipo"], "Link": p["link"]}
+                           for p in pubs[:20]])
+        tabela(tp, datas=["Data"], use_container_width=True, hide_index=True,
+               column_config={"Link": st.column_config.LinkColumn(
+                   "Link", display_text="abrir ↗")})
+    st.caption("Fonte: votos minerados das Atas do Colegiado — confira sempre no "
+               "inteiro teor da ata.")
+
+
+def _card_caso(r):
+    """Card de um julgado na ficha da disparidade, com a análise AGREGADA
+    (conduta + inteiro teor da jurisprudência)."""
+    pn = str(r.get("Processo", "") or "")
+    dd = _conduta_analise_do_proc(pn)
+    a = dd.get("analise") or {}
+    jr = dd.get("juris") or {}
+    with st.container(border=True):
+        val = r.get("Multa (R$)", 0) or 0
+        sev = str(r.get("Severidade", "")).strip()
+        cabec = (f"**{pn}**  ·  {str(r.get('Data', ''))[:10]}  ·  "
+                 f"{r.get('Réu', '')}  ·  "
+                 + (f"R$ {val:,.0f}".replace(",", ".") if val else "sem multa")
+                 + (f"  ·  severidade **{sev}**" if sev else ""))
+        st.markdown(cabec)
+        cond = _melhor(a.get("conduta_imputada"))
+        if cond:
+            st.markdown(f"**Conduta imputada:** {cond}")
+        if jr.get("area_tecnica"):
+            st.caption("Acusação (área técnica): " + str(jr["area_tecnica"])[:300])
+        resultado = _melhor(jr.get("resultado"), a.get("desfecho"))
+        if resultado:
+            st.markdown(f"**Resultado:** {resultado}")
+        votos = str(jr.get("votos") or "").strip().strip('"')
+        teses = jr.get("teses") or []
+        if votos or teses:
+            with st.expander("🗳️ Votação e teses (inteiro teor)"):
+                if votos:
+                    st.write(votos)
+                for t in teses:
+                    te = str(t.get("tese") or "").strip()
+                    if te:
+                        st.markdown(f"- *{_TEMA_LABEL.get(t.get('tema', ''), t.get('tema', ''))}:* {te}")
+        fontes = (["conduta"] if a else []) + (["inteiro teor"] if jr else [])
+        if fontes:
+            st.caption("🔗 Fontes: " + " + ".join(fontes))
+
+
+def _anos(serie):
+    a = serie.astype(str).str[:4]
+    a = a[a.str.match(r"\d{4}", na=False)]
+    return a.astype(int) if len(a) else a
+
+
+def _contraste_disparidade(alta, baixa):
+    """Leitura didática do que difere entre os polos grave e brando."""
+    out = []
+    fa = alta["Multa (R$)"][alta["Multa (R$)"] > 0]
+    fb = baixa["Multa (R$)"][baixa["Multa (R$)"] > 0]
+    ta = (f"R$ {fa.min():,.0f} a R$ {fa.max():,.0f}".replace(",", ".")
+          if len(fa) else "sem multa")
+    tb = (f"R$ {fb.min():,.0f} a R$ {fb.max():,.0f}".replace(",", ".")
+          if len(fb) else "sem multa")
+    out.append(f"**Multas** — graves: {ta}; brandos: {tb}.")
+    ra = alta["Réu"].mode()
+    rb = baixa["Réu"].mode()
+    if len(ra) and len(rb) and ra.iloc[0] != rb.iloc[0]:
+        out.append(f"**Perfil de réu** — nos graves predomina **{ra.iloc[0]}**; "
+                   f"nos brandos, **{rb.iloc[0]}** — o tratamento parece variar com "
+                   "o tipo de réu.")
+    ya, yb = _anos(alta["Data"]), _anos(baixa["Data"])
+    if len(ya) and len(yb):
+        out.append(f"**Período** — graves entre {ya.min()}–{ya.max()}; brandos "
+                   f"entre {yb.min()}–{yb.max()}.")
+        if yb.mean() > ya.mean() + 0.5:
+            out.append("Os casos **brandos são mais recentes** → possível "
+                       "abrandamento do entendimento ao longo do tempo.")
+        elif ya.mean() > yb.mean() + 0.5:
+            out.append("Os casos **graves são mais recentes** → possível "
+                       "endurecimento ao longo do tempo.")
+    return out
+
+
+@st.dialog("⚖️ Ficha da disparidade", width="large")
+def dialog_disparidade(d, tema, g):
+    """Ficha detalhada de UMA disparidade (tema com severidades opostas): o
+    contraste e os casos dos dois polos, lado a lado."""
+    alta = g[g["Severidade"] == "alta"]
+    baixa = g[g["Severidade"] == "baixa"]
+    st.markdown(f"### {_TEMA_LABEL.get(tema, tema)}")
+    st.caption(f"Disparidade na atuação de {d}")
+    st.warning(f"O mesmo tema recebeu de **{d}** severidades **opostas**: "
+               f"**{len(alta)} caso(s) grave(s)** × **{len(baixa)} brando(s)**.")
+    st.markdown("**🔎 Contraste (o que difere entre os polos):**")
+    for ins in _contraste_disparidade(alta, baixa):
+        st.markdown(f"- {ins}")
+    try:
+        ags, _ = _agentes_tese()
+        tv = str((ags.get(tema) or {}).get("tese_vigente") or "").strip()
+        if tv and tv != "-":
+            st.info(f"**⚖️ Tese vigente do tema:** {tv}")
+    except Exception:
+        pass
+    st.markdown("#### ⬆️ Tratados como GRAVES (severidade alta)")
+    for _, r in alta.sort_values("Data").iterrows():
+        _card_caso(r)
+    st.markdown("#### ⬇️ Tratados como BRANDOS (severidade baixa)")
+    for _, r in baixa.sort_values("Data").iterrows():
+        _card_caso(r)
+    st.caption("Indício a verificar — cada caso pode ter especificidades (provas, "
+               "dosimetria, contexto) que os dados agregados não capturam.")
+
+
+_MESES_PT = {"janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4,
+             "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
+             "outubro": 10, "novembro": 11, "dezembro": 12}
+
+
+def _dias_periodo(t):
+    """Dias (inclusive) de um período tipo '02 a 06 de março de 2026' ou
+    '31 de janeiro a 07 de fevereiro de 2026'."""
+    m = re.search(r"(\d{1,2})(?:\s+de\s+([a-zç]+))?(?:\s+de\s+(\d{4}))?\s+a\s+"
+                  r"(\d{1,2})\s+de\s+([a-zç]+)\s+de\s+(\d{4})", str(t or "").lower())
+    if not m:
+        return 0
+    try:
+        d1, mes1s, a1s, d2, mes2s, a2 = m.groups()
+        mes2 = _MESES_PT.get(mes2s)
+        mes1 = _MESES_PT.get(mes1s) if mes1s else mes2
+        a1 = int(a1s) if a1s else int(a2)
+        if not (mes1 and mes2):
+            return 0
+        return (dt.date(int(a2), mes2, int(d2))
+                - dt.date(a1, mes1, int(d1))).days + 1
+    except (ValueError, TypeError):
+        return 0
+
+
+@st.cache_data(ttl=300)
+def _diretor_boletim(d):
+    """Casa o nome curto do diretor com o nome completo do Boletim de Pessoal e
+    retorna (mandato, n_viagens, dias_viajando). Mandato vem dos movimentos
+    estatutários (Diretor/Presidente); viagens da tabela viagens."""
+    toks = [_ent_key(t) for t in str(d).split() if len(t) > 2]
+    if not toks or not os.path.exists(PESSOAL_DB_PATH):
+        return None, 0, 0
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    try:
+        nomes = [r[0] for r in con.execute(
+            "SELECT DISTINCT servidor_nome FROM movimentos "
+            "UNION SELECT DISTINCT servidor_nome FROM viagens")]
+    except Exception:
+        con.close()
+        return None, 0, 0
+    # agrega TODAS as variantes de grafia do nome (chaves distintas)
+    skeys = sorted({_ent_key(n) for n in nomes
+                    if all(t in _ent_key(n) for t in toks)})
+    if not skeys:
+        con.close()
+        return None, 0, 0
+    ph = ",".join("?" * len(skeys))
+    rows = con.execute(
+        "SELECT tipo, boletim_data_iso FROM movimentos WHERE servidor_key IN "
+        f"({ph}) AND (funcao LIKE '%Diretor%' OR funcao LIKE '%Presidente%') AND "
+        "boletim_data_iso<>'' ORDER BY boletim_data_iso", skeys).fetchall()
+    pers = [r[0] for r in con.execute(
+        f"SELECT periodo_ini FROM viagens WHERE servidor_key IN ({ph}) AND "
+        "tipo='afastamento_pais'", skeys)]
+    con.close()
+    noms = [x[1] for x in rows if x[0] == "nomeacao"]
+    exos = [x[1] for x in rows if x[0] == "exoneracao"]
+    mand = None
+    if noms:
+        start = noms[0]
+        exo_after = [e for e in exos if e >= noms[-1]]
+        ativo = not exo_after
+        end = exo_after[0] if exo_after else dt.date.today().isoformat()
+        try:
+            dias = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
+        except ValueError:
+            dias = 0
+        mand = {"start": start, "end": end, "ativo": ativo, "dias": dias}
+    return mand, len(pers), sum(_dias_periodo(p) for p in pers)
 
 
 def render_ficha_diretor():
@@ -4569,6 +4899,27 @@ def render_ficha_diretor():
     c3.metric("🚫 Retiradas de pauta",
               int((ev["evento"] == "retirou_de_pauta").sum()))
     c4.metric("⛔ Impedimentos", int((ev["evento"] == "impedimento").sum()))
+    # ---- mandato e viagens internacionais (cruzamento com o Boletim) ------
+    mand, n_vi, dias_vi = _diretor_boletim(d)
+    if mand or n_vi:
+        st.markdown("**🌍 Mandato e viagens internacionais** "
+                    "*(cruzado com o Boletim de Pessoal)*")
+        m1, m2, m3, m4 = st.columns(4)
+        if mand:
+            anos = mand["dias"] / 365.25
+            situ = ("em exercício" if mand["ativo"] else f"até {mand['end']}")
+            m1.metric("🗓️ Tempo de mandato", f"{anos:.1f} anos",
+                      help=f"Início {mand['start']} · {situ}")
+        else:
+            m1.metric("🗓️ Tempo de mandato", "—")
+        m2.metric("✈️ Viagens ao exterior", n_vi)
+        m3.metric("📅 Dias viajando", dias_vi)
+        if mand and mand["dias"] > 0:
+            m4.metric("📊 % do mandato viajando",
+                      f"{100 * dias_vi / mand['dias']:.1f}%")
+        st.caption("Mandato = da nomeação estatutária à exoneração (ou hoje, se em "
+                   "exercício). Dias viajando = soma dos períodos de afastamento do "
+                   "país. Ambos dependem do que consta nos boletins.")
     st.divider()
     # ---- quem ele julga (parametrização por réu) + severidade -------------
     cA, cB = st.columns(2)
@@ -4660,12 +5011,32 @@ def render_ficha_diretor():
                              use_container_width=True, hide_index=True)
             else:
                 st.caption("— nenhum registro —")
-        casos = ali[((ali["diretor_a"] == d) | (ali["diretor_b"] == d))]
+        casos = ali[((ali["diretor_a"] == d) | (ali["diretor_b"] == d))].copy()
+        casos = casos.reset_index(drop=True)
         if len(casos):
-            with st.expander(f"🔍 Casos das correlações ({len(casos)})"):
-                st.dataframe(casos[["data_iso", "diretor_a", "tipo",
-                                    "diretor_b", "processo", "trecho"]],
-                             use_container_width=True, hide_index=True)
+            st.markdown(f"**🔍 Conflitos de decisão de {d} — clique para a ficha "
+                        f"didática da divergência ({len(casos)}):**")
+            _TIPOL = {"divergiu_de": "divergiu de",
+                      "pediu_vista_sobre": "pediu vista s/"}
+            casos["Quem × Quem"] = casos.apply(
+                lambda r: f"{r['diretor_a']} {_TIPOL.get(r['tipo'], r['tipo'])} "
+                f"{r['diretor_b']}", axis=1)
+            casos["Resumo"] = (casos["trecho"].fillna("").str.replace(
+                r"\s+", " ", regex=True).str.replace("ASSUNTO: ", "", regex=False)
+                .str.slice(0, 110))
+            disp = casos[["data_iso", "Quem × Quem", "processo", "Resumo"]].rename(
+                columns={"data_iso": "Data", "processo": "Processo"})
+            ev = st.dataframe(disp, use_container_width=True, hide_index=True,
+                              on_select="rerun", selection_mode="single-row",
+                              key="div_sel")
+            rows = ev.selection.rows if getattr(ev, "selection", None) else []
+            if rows:
+                idx = rows[0]
+                cs = casos.iloc[idx]
+                chave = f"{cs['processo']}|{cs['diretor_a']}|{cs['diretor_b']}"
+                if chave != st.session_state.get("_div_open"):
+                    st.session_state["_div_open"] = chave
+                    dialog_divergencia(cs)
     # ---- RELATÓRIO DE INCONSISTÊNCIAS -------------------------------------
     st.divider()
     st.markdown("### ⚠️ Relatório de inconsistências")
@@ -4719,9 +5090,11 @@ def render_ficha_diretor():
                    .replace(",", ".")) if len(faixa) else ""
             with st.expander(f"⚠️ {_TEMA_LABEL.get(tema, tema)} — "
                              f"{len(alta)} grave(s) × {len(baixa)} brando(s){rng}"):
-                st.caption("O mesmo tipo de infração recebeu deste diretor "
-                           "severidades opostas. Compare os polos antagônicos — "
-                           "clique em qualquer processo para a análise:")
+                if st.button("📋 Ficha detalhada desta disparidade",
+                             key=f"disp_{tema}", use_container_width=True):
+                    dialog_disparidade(d, tema, g)
+                st.caption("Ou compare os polos antagônicos abaixo — clique em "
+                           "qualquer processo para a análise individual:")
                 cG, cB = st.columns(2)
                 with cG:
                     st.markdown("⬆️ **Tratou como mais GRAVE** (severidade alta)")

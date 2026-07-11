@@ -112,26 +112,95 @@ def preencher_datas(con):
     print(f"[extrair] datas preenchidas: {n}")
 
 
-def _viagens_pais(sec):
+# nomes proprios em CAIXA ALTA (nos afastamentos)
+_NOME_ALTA = r"[A-ZÀ-Ú][A-ZÀ-Ú'’.\- ]{4,}?"
+# separador de registro no formato antigo (2001-2011): NOME (>=2 palavras) na
+# linha, apos "-" opcional, ate o proximo NOME/"Despacho"/fim
+_PAIS_START = r"[A-ZÀ-Ú][A-ZÀ-Ú'’.\-]+(?:\s+[A-ZÀ-Ú'’.\-]+){1,6}"
+_PAIS_RECORD = re.compile(r"^[ \t]*-?\s*(" + _PAIS_START + r"),\s*(.*?)"
+                          r"(?=^[ \t]*-?\s*" + _PAIS_START + r",|^[ \t]*Despacho|\Z)",
+                          re.M | re.S)
+_PAIS_VERBO = re.compile(r"afastar-se do pa[ií]s|a fim de|participar", re.I)
+
+
+def _reg_pais(nome, destino, periodo, motivo, onus, processo):
+    return {"tipo": "afastamento_pais", "servidor_nome": nome, "cargo": "",
+            "origem": "", "destino": destino, "periodo_ini": periodo,
+            "periodo_fim": "", "motivo": motivo, "descricao": onus,
+            "valor_diarias": "", "pcdp": "", "processo": processo}
+
+
+def _pais_moderno(sec):
+    """Formato 'autoriza o afastamento do pais de NOME[, cargo][, e de NOME2],
+    no periodo de ..., a fim de participar de ..., em LOCAL. (Processo ...)'.
+    Case-insensitive e multi-viajante."""
     out = []
-    # cada autorizacao comeca em 'afastamento do Pais de NOME,'
-    for m in re.finditer(r"afastamento do Pa[ií]s de\s+([A-ZÀ-Ú][^,]+?),\s*(.*?)"
-                         r"(?=afastamento do Pa[ií]s de|\Z)", sec, re.S):
+    flat = re.sub(r"\s+", " ", sec).strip()
+    for p in re.split(r"(?i)(?=\bafastamento do pa[ií]s\b)", flat):
+        if not re.search(r"(?i)afastamento do pa[ií]s", p):
+            continue
+        cabeca = re.split(r"(?i)\bno per[ií]odo\b|\ba fim de\b|\bpara participar",
+                          p, maxsplit=1)[0]
+        nomes = [re.sub(r"\s+", " ", n).strip() for n in re.findall(
+            r"(?i)(?:afastamento do pa[ií]s d(?:e|o servidor|a servidora|"
+            r"os servidor[ae]s)|,?\s+e\s+de)\s+(" + _NOME_ALTA + r")\s*,", cabeca)]
+        nomes = [n for n in nomes if _valida_nome(n)]
+        if not nomes:
+            continue
+        mper = re.search(r"(?i)no per[ií]odo de\s+(.*?)(?:,?\s*inclusive|,\s*com [oô]"
+                         r"nus|,\s*sem [oô]nus|,\s*a fim|\.)", p)
+        mmot = re.search(r"(?i)a fim de\s+participar(?:em)?\s+(?:d[aeo]s?\s+)?(.*?)"
+                         r"(?:,?\s*que ser[aá] realizad|,\s*em [A-ZÀ-Ú]|\.\s*\(?Proc"
+                         r"esso|\.\s*conforme|$)", p)
+        mdes = re.search(r"(?i)(?:ser[aá]?\s+realizad[ao]s?\s+em|realizad[ao]s?\s+em|"
+                         r"na cidade de|,\s*em)\s+([A-ZÀ-Ú][^.()]*?)"
+                         r"(?:\.|\(|,?\s*conforme| no per[ií]odo|$)", p)
+        mpr = re.search(r"(?i)Processo\s*(?:CVM\s*)?n[ºo.]?\s*((?:RJ\s*)?[\d./-]+)", p)
+        onus = ("sem onus" if re.search(r"(?i)sem [oô]nus", p)
+                else "com onus" if re.search(r"(?i)com [oô]nus", p) else "")
+        per = mper.group(1).strip() if mper else ""
+        mot = mmot.group(1).strip() if mmot else ""
+        des = mdes.group(1).strip(" ,") if mdes else ""
+        pr = mpr.group(1).strip() if mpr else ""
+        for nome in nomes:
+            out.append(_reg_pais(nome, des, per, mot, onus, pr))
+    return out
+
+
+def _pais_antigo(sec):
+    """Formato 2001-2011: 'NOME, [cargo,] a afastar-se do Pais / a fim de
+    participar ..., em LOCAL, no periodo de ...'. Nome no inicio da linha."""
+    out = []
+    for m in _PAIS_RECORD.finditer(sec):
         nome = re.sub(r"\s+", " ", m.group(1)).strip()
         corpo = re.sub(r"\s+", " ", m.group(2)).strip()
-        per = re.search(r"no per[ií]odo de\s+(.*?)(?:,?\s*inclusive|,\s*com [oô]nus|"
-                        r",\s*a fim)", corpo, re.I)
-        motivo = re.search(r"a fim de\s+(.*?)(?:\.\s|\(Processo|$)", corpo, re.I)
-        dest = re.search(r"(?:realizad[ao]|ocorrer[aá]?)\s+em\s+([^.(]+)", corpo, re.I)
-        proc = re.search(r"Processo\s+CVM\s+n[ºo\.]?\s*([\d./-]+)", corpo, re.I)
-        out.append({"tipo": "afastamento_pais", "servidor_nome": nome,
-                    "cargo": "", "origem": "", "destino": (dest.group(1).strip()
-                    if dest else ""), "periodo_ini": (per.group(1).strip()
-                    if per else ""), "periodo_fim": "",
-                    "motivo": (motivo.group(1).strip() if motivo else ""),
-                    "descricao": "", "valor_diarias": "", "pcdp": "",
-                    "processo": (proc.group(1).strip() if proc else "")})
+        low = corpo.lower()
+        if "insubsistente" in low or not _PAIS_VERBO.search(low) \
+                or not _valida_nome(nome):
+            continue
+        mmot = re.search(r"(?i)(?:a fim de|para)\s+(.*?)(?:,\s*(?:em|na Cidade de|na|"
+                         r"no)\s|,?\s*no per[ií]odo)", corpo)
+        mdes = re.search(r"(?i)(?:,\s*em|,\s*na Cidade de|,\s*na)\s+([A-ZÀ-Ú][^,.()]"
+                         r"{2,40}(?:,\s*[A-ZÀ-Ú][^,.()]{2,30})?)\s*,?\s*(?:inclusive"
+                         r"[^,]*,\s*)?no per[ií]odo", corpo)
+        mper = re.search(r"(?i)no per[ií]odo de\s+(.*?)(?:,?\s*inclusive|,\s*com [oô]"
+                         r"nus|,\s*sem [oô]nus|\.\s|\(Processo|$)", corpo)
+        mpr = re.search(r"(?i)Processo\s*n[ºo.]?\s*((?:RJ\s*)?[\d./-]+)", corpo)
+        onus = ("sem onus" if re.search(r"(?i)sem [oô]nus", low)
+                else "com onus" if re.search(r"(?i)com [oô]nus", low) else "")
+        out.append(_reg_pais(
+            nome, mdes.group(1).strip() if mdes else "",
+            mper.group(1).strip() if mper else "",
+            mmot.group(1).strip() if mmot else "", onus,
+            mpr.group(1).strip() if mpr else ""))
     return out
+
+
+def _viagens_pais(sec):
+    """Afastamentos do Pais: tenta o formato moderno (todas as epocas recentes,
+    inclusive 'pais' minusculo e multi-viajante); se nao houver, o antigo."""
+    recs = _pais_moderno(sec)
+    return recs if recs else _pais_antigo(sec)
 
 
 def _viagens_diarias(sec):

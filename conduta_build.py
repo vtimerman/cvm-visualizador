@@ -190,6 +190,14 @@ def build():
             dec = str(it.get("decisao") or "")
             ass = str(it.get("assunto") or "")[:120]
             rl = str(it.get("relator") or "").strip().upper()
+            # trecho DIDATICO da divergencia (assunto + decisao + votos), p/ ficha
+            trecho_div = " \n".join(x for x in [
+                ("ASSUNTO: " + str(it.get("assunto") or "")[:300]
+                 if it.get("assunto") else ""),
+                ("RELATOR: " + str(it.get("relator") or "")
+                 if it.get("relator") else ""),
+                ("DECISAO: " + dec[:300] if dec else ""),
+                ("VOTOS: " + votos[:900] if votos else "")] if x)[:1600]
             # relatoria de item por diretor (sigla ou PTE resolvido pela data)
             drel = SIGLAS.get(rl) or (pte_em(data_iso or "") if rl == "PTE" else "")
             if drel:
@@ -228,7 +236,7 @@ def build():
                         con.execute(
                             "INSERT INTO alinhamentos(diretor_a,tipo,diretor_b,"
                             "processo,data_iso,trecho) VALUES(?,?,?,?,?,?)",
-                            (v, "divergiu_de", w, proc, data_iso, votos[:200]))
+                            (v, "divergiu_de", w, proc, data_iso, trecho_div))
             # correlacao: pedido de vista SOBRE relatoria de outro diretor
             if drel:
                 for m in re.finditer(r"(?:pedido de vista d[oa]|pediu vista|"
@@ -240,7 +248,7 @@ def build():
                             "INSERT INTO alinhamentos(diretor_a,tipo,diretor_b,"
                             "processo,data_iso,trecho) VALUES(?,?,?,?,?,?)",
                             (d, "pediu_vista_sobre", drel, proc, data_iso,
-                             ass[:200]))
+                             trecho_div))
             # TC aceito/rejeitado (item colegiado; valor quando citado)
             blob = (ass + " " + dec).lower()
             if "termo de compromisso" in blob:
