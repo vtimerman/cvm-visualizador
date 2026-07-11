@@ -4120,6 +4120,48 @@ def _dados_ficha_diretor(d):
     return ev, pz, perfil, (json.loads(dossie[0]) if dossie else {}), ana
 
 
+@st.cache_data(ttl=600)
+def _inconsistencias_diretor(d):
+    """Detector determinístico: julgados do diretor onde o MESMO tema teve
+    severidades opostas (alta e baixa) — candidatos a inconsistência, com os
+    casos concretos para verificação. Retorna (df, clusters)."""
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return pd.DataFrame(), []
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT e.proc_norm, e.data_iso, e.valor, ct.tema, a.analise, "
+            "jp.n_pf, jp.n_empresa, jp.n_financeira FROM eventos e "
+            "LEFT JOIN caso_tema ct ON ct.proc_norm=e.proc_norm AND ct.dominante=1 "
+            "LEFT JOIN analises a ON a.proc_norm=e.proc_norm AND a.tipo='julgado' "
+            "LEFT JOIN julgado_perfil jp ON jp.proc_norm=e.proc_norm "
+            "WHERE e.diretor=? AND e.evento='julgou'", (d,)).fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    recs = []
+    for pn, di, val, tema, an, pf, emp, fin in rows:
+        try:
+            a = json.loads(an) if an else {}
+        except (ValueError, TypeError):
+            a = {}
+        cls = ("Inst. financeira" if (fin or 0) > 0 else
+               "Empresa" if (emp or 0) > 0 else "Pessoa física")
+        recs.append({"Processo": pn, "Data": di or "", "tema": tema or "outros",
+                     "Réu": cls, "Severidade": str(a.get("severidade") or "?")
+                     .lower().replace("média", "media"), "Multa (R$)": val or 0,
+                     "Conduta": str(a.get("conduta_imputada") or "")[:160],
+                     "Desfecho": str(a.get("desfecho") or "")[:160]})
+    df = pd.DataFrame(recs)
+    clusters = []
+    if len(df):
+        for tema, g in df.groupby("tema"):
+            sevs = set(g["Severidade"])
+            if tema != "outros" and len(g) >= 2 and {"alta", "baixa"} <= sevs:
+                clusters.append((tema, g.sort_values("Severidade")))
+    return df, clusters
+
+
 def render_ficha_diretor():
     st.markdown("#### 🎯 Ficha visual do diretor")
     if not os.path.exists(CONDUTA_DB_PATH):
@@ -4294,6 +4336,43 @@ def render_ficha_diretor():
                 st.dataframe(casos[["data_iso", "diretor_a", "tipo",
                                     "diretor_b", "processo", "trecho"]],
                              use_container_width=True, hide_index=True)
+    # ---- RELATÓRIO DE INCONSISTÊNCIAS -------------------------------------
+    st.divider()
+    st.markdown("### ⚠️ Relatório de inconsistências")
+    st.caption("Pontos onde a atuação do diretor merece escrutínio. As hipóteses "
+               "são indícios a verificar — casos podem ter especificidades que os "
+               "dados não capturam.")
+    inc = dossie.get("incoerencias") if dossie else None
+    if inc:
+        st.markdown("**🧠 Hipóteses levantadas (IA):**")
+        for c in (inc if isinstance(inc, list) else [inc]):
+            if str(c).strip() and str(c).strip() != "-":
+                st.markdown(f"- {c}")
+    df_inc, clusters = _inconsistencias_diretor(d)
+    if clusters:
+        st.markdown(f"**📊 Casos comparáveis com desfecho díspar "
+                    f"({len(clusters)} tema(s)):**")
+        st.caption("Mesmo tema julgado por este diretor com severidades **opostas** "
+                   "(alta e baixa) — a disparidade fica visível lado a lado.")
+        for tema, g in clusters:
+            faixa = g[g["Multa (R$)"] > 0]["Multa (R$)"]
+            rng = (f" · multas de R$ {faixa.min():,.0f} a R$ {faixa.max():,.0f}"
+                   .replace(",", ".")) if len(faixa) else ""
+            with st.expander(f"⚠️ {_TEMA_LABEL.get(tema, tema)} — {len(g)} julgados, "
+                             f"severidades divergentes{rng}"):
+                st.dataframe(
+                    g[["Data", "Processo", "Réu", "Severidade", "Multa (R$)",
+                       "Conduta", "Desfecho"]].sort_values(
+                        ["Severidade", "Data"]),
+                    use_container_width=True, hide_index=True)
+    elif len(df_inc):
+        st.success("Nenhuma divergência de severidade dentro de um mesmo tema "
+                   "detectada (na cobertura atual 2022–2026).")
+    st.caption("A varredura da jurisprudência completa (1999–2025) aprofundará "
+               "este relatório: mesma tese com dosimetria díspar ao longo dos anos, "
+               "e tratamento diferente entre classes de réu no mesmo caso.")
+
+
 def render_colegiado():
     st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
     visao = st.segmented_control(
