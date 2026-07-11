@@ -1400,6 +1400,21 @@ def render_termos():
         f_anos = c3.multiselect("Ano da decisão", anos, key="tc_anos")
         so_desp = c4.checkbox("Só com despacho/audiência cruzado", key="tc_desp",
                               help="Mostra apenas TCs com audiência particular relacionada.")
+        f_paut = st.selectbox(
+            "🗓️ Pautado para julgamento", ["Todos",
+            "Só com processo pautado (qualquer sessão)",
+            "Só em pauta futura (indo a julgamento)"], key="tc_paut",
+            help="Cruza o processo do TC com a Pauta de Sessão de Julgamento (SEI).")
+    # mapa: proc_norm -> situação de pauta (última sessão)
+    hoje_iso = dt.date.today().isoformat()
+    paut = {}
+    for pn_p, lst in _mapa_pauta_sei().items():
+        u = max(lst, key=lambda x: str(x.get("data_sessao_iso") or ""))
+        ds = str(u.get("data_sessao_iso") or "")
+        sit = str(u.get("situacao") or "")
+        fut = bool(ds) and ds >= hoje_iso and not sit.startswith("retirado")
+        paut[pn_p] = {"data": u.get("data_sessao", ""), "situacao": sit,
+                      "futuro": fut}
     m = pd.Series(True, index=df.index)
     if q.strip():
         m &= match_busca(df, ["processo", "partes"], q)
@@ -1420,12 +1435,26 @@ def render_termos():
     res = df[m].copy()
     if so_desp:
         res = res[res["processo"].apply(lambda p: len(despachos_do_processo(p)) > 0)]
+    if f_paut != "Todos":
+        if f_paut.startswith("Só em pauta futura"):
+            res = res[res["proc_norm"].map(
+                lambda p: paut.get(p, {}).get("futuro", False))]
+        else:
+            res = res[res["proc_norm"].isin(paut.keys())]
+    res["Pautado p/ sessão"] = res["proc_norm"].map(
+        lambda p: (f"{paut[p]['data']} "
+                   + ("🚫" if paut[p]["situacao"].startswith("retirado")
+                      else "🗓️" if paut[p]["futuro"] else "•"))
+        if p in paut else "")
     res = res.sort_values("data_decisao_iso", ascending=False).reset_index(drop=True)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Termos encontrados", f"{len(res):,}".replace(",", "."))
     c2.metric("Total na base", f"{len(df):,}".replace(",", "."))
-    cols = ["processo", "situacao", "data_decisao", "data_assinatura",
-            "data_publicacao", "data_arquivamento", "partes", "link"]
+    c3.metric("🗓️ Pautados p/ julgamento",
+              int(res["Pautado p/ sessão"].astype(bool).sum()))
+    cols = ["processo", "situacao", "Pautado p/ sessão", "data_decisao",
+            "data_assinatura", "data_publicacao", "data_arquivamento",
+            "partes", "link"]
     show = res[cols].rename(columns={
         "processo": "Processo", "situacao": "Situação", "data_decisao": "Decisão",
         "data_assinatura": "Assinatura", "data_publicacao": "Publicação",
