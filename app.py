@@ -3168,6 +3168,153 @@ def carregar_viagens():
     return df
 
 
+@st.cache_data(ttl=300)
+def carregar_movimentos():
+    """Movimentos de cargo (nomeação/exoneração/designação) do Boletim de Pessoal."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return None
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM movimentos", con)
+    except Exception:
+        df = None
+    con.close()
+    return df
+
+
+def _ocupacao_atual(mov):
+    """Posição mais atual de CADA servidor: seu último movimento; quando é
+    nomeação/designação com função, representa a posição vigente/última
+    conhecida (uma linha por servidor). Exonerações fora das seções lidas
+    podem não aparecer, então é a última posição *conhecida*."""
+    if mov is None or not len(mov):
+        return pd.DataFrame()
+    m = mov.sort_values("boletim_data_iso")
+    ult = m.groupby("servidor_key", as_index=False).tail(1)
+    return ult[ult["tipo"].isin(["nomeacao", "designacao"])
+               & ult["funcao"].astype(bool)].copy()
+
+
+@st.dialog("🗂️ Ficha do servidor", width="large")
+def dialog_servidor(nome):
+    """Ficha individual completa do servidor (aberta ao clicar no nome)."""
+    _ficha_servidor(nome)
+
+
+def _abrir_ficha_sel(ev, disp, statekey, col="Servidor"):
+    """Abre a ficha do servidor da linha selecionada num st.dataframe."""
+    rows = ev.selection.rows if getattr(ev, "selection", None) else []
+    if rows:
+        nome = disp.iloc[rows[0]][col]
+        if nome and nome != st.session_state.get(statekey):
+            st.session_state[statekey] = nome
+            dialog_servidor(nome)
+
+
+_MOV_LABEL = {"nomeacao": "🟢 Nomeação", "exoneracao": "🔴 Exoneração",
+              "designacao": "🔵 Designação"}
+
+
+def render_organograma():
+    st.markdown("#### 🏛️ Organograma — posição atual dos servidores")
+    mov = carregar_movimentos()
+    if mov is None or len(mov) == 0:
+        st.info("⏳ Movimentos de cargo ainda não extraídos do Boletim de Pessoal.")
+        return
+    mov = mov.copy()
+    mov["_ano"] = mov["boletim_data_iso"].astype(str).str[:4]
+    nsig = int(mov[mov["sigla"] != ""]["sigla"].nunique())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🟢 Nomeações", int((mov["tipo"] == "nomeacao").sum()))
+    c2.metric("🔴 Exonerações", int((mov["tipo"] == "exoneracao").sum()))
+    c3.metric("🔵 Designações", int((mov["tipo"] == "designacao").sum()))
+    c4.metric("🏢 Unidades", nsig)
+    st.caption("👉 **Clique em qualquer servidor** para abrir a ficha individual "
+               "(trajetória de cargos, viagens, boletins e menções no Diário).")
+    sub = st.radio("Ver", ["Quadro atual (por servidor)",
+                           "Histórico de movimentos"], horizontal=True,
+                   key="org_sub", label_visibility="collapsed")
+    if sub == "Quadro atual (por servidor)":
+        pos = _ocupacao_atual(mov)
+        if not len(pos):
+            st.info("Sem posições estimáveis na base atual.")
+            return
+        nomeun = pos[pos["sigla"] != ""].groupby("sigla")["unidade"].agg(
+            lambda s: s.value_counts().index[0] if len(s.value_counts()) else "")
+        with st.expander("🔎 Filtros", expanded=True):
+            c1, c2 = st.columns(2)
+            q = c1.text_input("Servidor ou função contém", key="org_q")
+            sigs = sorted(s for s in pos["sigla"].dropna().unique() if s)
+            f_sig = c2.multiselect(
+                "Unidade (sigla)", sigs, key="org_fsig",
+                format_func=lambda s: f"{s} — {nomeun.get(s, '')}"[:50])
+        m = pd.Series(True, index=pos.index)
+        if q.strip():
+            m &= (pos["servidor_nome"].str.contains(re.escape(q), case=False,
+                                                    na=False)
+                  | pos["funcao"].str.contains(re.escape(q), case=False, na=False))
+        if f_sig:
+            m &= pos["sigla"].isin(f_sig)
+        r = pos[m].sort_values(["sigla", "funcao", "servidor_nome"])
+        st.caption(f"{len(r):,} servidores — cada um na sua posição mais recente "
+                   "conhecida (uma linha por servidor).".replace(",", "."))
+        show = r[["sigla", "unidade", "funcao", "codigo", "servidor_nome",
+                  "boletim_data_iso"]].rename(columns={
+                      "sigla": "Sigla", "unidade": "Unidade", "funcao": "Função",
+                      "codigo": "Código", "servidor_nome": "Servidor",
+                      "boletim_data_iso": "Desde (boletim)"})
+        ev = st.dataframe(show, use_container_width=True, hide_index=True,
+                          height=460, on_select="rerun",
+                          selection_mode="single-row", key="org_pos_sel")
+        _abrir_ficha_sel(ev, show, "_srv_open_pos")
+        st.download_button(
+            "⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+            file_name="posicao_atual_servidores_cvm.csv", mime="text/csv")
+        st.caption("⚠️ 'Posição atual' = último movimento captado de cada servidor; "
+                   "exonerações fora das seções lidas podem não aparecer. O "
+                   "**Colegiado** (presidente e diretores) é autoritativo na aba "
+                   "Colegiado.")
+    else:
+        with st.expander("🔎 Filtros", expanded=True):
+            c1, c2, c3, c4 = st.columns(4)
+            q = c1.text_input("Servidor (nome contém)", key="org_hq")
+            f_tipo = c2.multiselect("Tipo", list(_MOV_LABEL),
+                                    format_func=lambda t: _MOV_LABEL[t],
+                                    key="org_htipo")
+            sigs = sorted(s for s in mov["sigla"].dropna().unique() if s)
+            f_sig = c3.multiselect("Unidade (sigla)", sigs, key="org_hsig")
+            anos = sorted((a for a in mov["_ano"].unique() if a and a != "None"),
+                          reverse=True)
+            f_ano = c4.multiselect("Ano", anos, key="org_hano")
+        m = pd.Series(True, index=mov.index)
+        if q.strip():
+            m &= mov["servidor_nome"].str.contains(re.escape(q), case=False, na=False)
+        if f_tipo:
+            m &= mov["tipo"].isin(f_tipo)
+        if f_sig:
+            m &= mov["sigla"].isin(f_sig)
+        if f_ano:
+            m &= mov["_ano"].isin(f_ano)
+        res = mov[m].copy()
+        res["Movimento"] = res["tipo"].map(_MOV_LABEL).fillna(res["tipo"])
+        res["Cargo/Função"] = res["funcao"].where(
+            res["funcao"].astype(bool), res["cargo_efetivo"])
+        st.caption(f"{len(res):,} movimentos no filtro.".replace(",", "."))
+        show = res.sort_values("boletim_data_iso", ascending=False)[
+            ["boletim_data_iso", "Movimento", "servidor_nome", "Cargo/Função",
+             "codigo", "sigla", "unidade", "portaria"]].rename(
+                columns={"boletim_data_iso": "Data", "servidor_nome": "Servidor",
+                         "codigo": "Código", "sigla": "Sigla", "unidade": "Unidade",
+                         "portaria": "Portaria"})
+        ev = st.dataframe(show, use_container_width=True, hide_index=True,
+                          height=460, on_select="rerun",
+                          selection_mode="single-row", key="org_hist_sel")
+        _abrir_ficha_sel(ev, show, "_srv_open_hist")
+        st.download_button(
+            "⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+            file_name="movimentos_cargo_cvm.csv", mime="text/csv")
+
+
 def _ficha_servidor(nome):
     """Tudo sobre um servidor: viagens, boletins que o citam e menções no SEI."""
     st.markdown(f"### 🗂️ {nome}")
@@ -3175,19 +3322,54 @@ def _ficha_servidor(nome):
     con = sqlite3.connect(PESSOAL_DB_PATH)
     vg = pd.read_sql("SELECT * FROM viagens WHERE servidor_key=:k", con,
                      params={"k": k})
+    try:
+        mov = pd.read_sql(
+            "SELECT tipo, funcao, codigo, sigla, unidade, cargo_efetivo, portaria, "
+            "data_ato_iso, boletim_data_iso, link_boletim FROM movimentos WHERE "
+            "servidor_key=:k ORDER BY boletim_data_iso DESC", con, params={"k": k})
+    except Exception:
+        mov = pd.DataFrame()
     bols = pd.read_sql(
         "SELECT numero, data, pdf_url FROM boletins WHERE texto LIKE :n "
         "ORDER BY data_iso DESC LIMIT 60", con, params={"n": f"%{nome}%"})
     con.close()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("✈️ Viagens", len(vg))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🏛️ Movimentos", len(mov))
+    c2.metric("✈️ Viagens", len(vg))
     try:
         tot = sum(float(str(v).replace(".", "").replace(",", "."))
                   for v in vg["valor_diarias"] if str(v).strip())
     except Exception:
         tot = 0
-    c2.metric("💰 Diárias (R$)", f"{tot:,.0f}".replace(",", "."))
-    c3.metric("📋 Citado em boletins", len(bols))
+    c3.metric("💰 Diárias (R$)", f"{tot:,.0f}".replace(",", "."))
+    c4.metric("📋 Citado em boletins", len(bols))
+    # trajetória de cargos: o que o servidor ocupa/ocupou
+    if len(mov):
+        atual = mov[mov["tipo"].isin(["nomeacao", "designacao"])
+                    & (mov["funcao"] != "")]
+        if len(atual):
+            top = atual.iloc[0]
+            st.success(f"**Posição mais recente:** {top['funcao']}"
+                       + (f" ({top['codigo']})" if top['codigo'] else "")
+                       + (f" — {top['unidade']} ({top['sigla']})" if top['sigla']
+                          else "") + f"  ·  {top['boletim_data_iso']}")
+        st.markdown("**🏛️ Trajetória de cargos** (nomeações 🟢, designações 🔵, "
+                    "exonerações 🔴):")
+        _TL = {"nomeacao": "🟢 Nomeação", "exoneracao": "🔴 Exoneração",
+               "designacao": "🔵 Designação"}
+        disp = mov.copy()
+        disp["Movimento"] = disp["tipo"].map(_TL).fillna(disp["tipo"])
+        disp["Cargo/Função"] = disp["funcao"].where(
+            disp["funcao"].astype(bool), disp["cargo_efetivo"])
+        st.dataframe(
+            disp[["boletim_data_iso", "Movimento", "Cargo/Função", "codigo",
+                  "sigla", "unidade", "link_boletim"]].rename(columns={
+                      "boletim_data_iso": "Data", "codigo": "Código",
+                      "sigla": "Sigla", "unidade": "Unidade",
+                      "link_boletim": "Boletim"}),
+            use_container_width=True, hide_index=True, height=240,
+            column_config={"Boletim": st.column_config.LinkColumn(
+                "Boletim", display_text="abrir ↗")})
     if len(vg):
         st.markdown("**✈️ Viagens:**")
         st.dataframe(vg[["boletim_data_iso", "tipo", "origem", "destino",
@@ -3270,22 +3452,36 @@ def _render_contratacoes():
 
 
 def render_servidores():
-    st.subheader("🏢 Servidores da CVM — Viagens (Boletim de Pessoal)")
+    st.subheader("🏢 Servidores da CVM (Boletim de Pessoal)")
     df = carregar_viagens()
-    if df is None or len(df) == 0:
-        st.info("⏳ A base de viagens do Boletim de Pessoal ainda está sendo montada.")
+    mov = carregar_movimentos()
+    if (df is None or len(df) == 0) and (mov is None or len(mov) == 0):
+        st.info("⏳ A base do Boletim de Pessoal ainda está sendo montada.")
         return
-    # ficha individual + contratações
-    nomes = sorted(df["servidor_nome"].dropna().unique())
-    sel_srv = st.selectbox("🗂️ Ficha do servidor", nomes, key="srv_ficha",
-                           index=None, placeholder="escolha um servidor para a "
-                           "ficha completa…")
-    if sel_srv:
-        _ficha_servidor(sel_srv)
-        st.divider()
-    with st.expander("🏗️ Contratações e projetos internos (GELIC/SAD × CGE)"):
-        _render_contratacoes()
+    # ficha individual (viagens + trajetória de cargos)
+    nomes = sorted(set(
+        (list(df["servidor_nome"].dropna().unique()) if df is not None else [])
+        + (list(mov["servidor_nome"].dropna().unique()) if mov is not None else [])))
+    sel_srv = st.selectbox("🗂️ Buscar servidor (abre a ficha completa)", nomes,
+                           key="srv_ficha", index=None,
+                           placeholder="digite um nome…")
+    if sel_srv and sel_srv != st.session_state.get("_srv_open_sel"):
+        st.session_state["_srv_open_sel"] = sel_srv
+        dialog_servidor(sel_srv)
+    vis = st.segmented_control(
+        "Seção", ["🏛️ Organograma e cargos", "✈️ Viagens", "🏗️ Contratações"],
+        key="srv_sub", default="🏛️ Organograma e cargos",
+        label_visibility="collapsed")
     st.divider()
+    if vis == "🏛️ Organograma e cargos":
+        render_organograma()
+        return
+    if vis == "🏗️ Contratações":
+        _render_contratacoes()
+        return
+    if df is None or len(df) == 0:
+        st.info("Sem viagens na base ainda.")
+        return
     df = df.copy()
     df["_ano"] = df["boletim_data_iso"].astype(str).str[:4]
     st.caption(f"{len(df):,} viagens de {df['servidor_key'].nunique()} servidores "
@@ -4120,6 +4316,140 @@ def _dados_ficha_diretor(d):
     return ev, pz, perfil, (json.loads(dossie[0]) if dossie else {}), ana
 
 
+# palavras-chave por tema, para mapear uma hipótese textual da IA a casos concretos
+_TEMA_KW = {
+    "insider_trading": ["insider", "informacao privilegiada", "informação privilegiada",
+                        "art. 155", "155"],
+    "manipulacao_fraude": ["manipula", "fraud", "artificiais", "nao equitativ",
+                           "não equitativ", "spoofing", "layering"],
+    "fato_relevante_dri": ["fato relevante", "dri", "art. 157", "157", "divulga"],
+    "dever_diligencia_adm": ["diligencia", "diligência", "lealdade", "administrador",
+                             "conselheir", "diretor estatut", "153", "154"],
+    "abuso_controle": ["abuso de poder", "poder de controle", "controlador", "116", "117"],
+    "carteira_irregular": ["carteira"],
+    "fundos_investimento": ["fundo", "fidc", "fii", "gestor", "fiduci", "cotista"],
+    "ofertas_publicas": ["oferta"],
+    "auditoria": ["auditor"],
+    "intermediarios": ["corretora", "churning", "suitability", "intermedia",
+                       "distribuidora"],
+    "informacoes_periodicas": ["formulario de referencia", "formulário", "demonstracoes",
+                               "demonstrações", "periodic", "itr", "dfp", "atraso na"],
+    "assembleia_conflito": ["assembleia", "conflito de interess", "direito de voto"],
+    "agentes_autonomos": ["agente autonomo", "agente autônomo", "assessor de invest"],
+    "rito_processual": ["prescri", "nulidade", "cerceamento"],
+}
+
+
+def _tema_de_texto(txt):
+    """Temas prováveis de uma hipótese textual (para linkar a casos concretos)."""
+    t = str(txt or "").lower()
+    return [tema for tema, kws in _TEMA_KW.items() if any(k in t for k in kws)]
+
+
+def _procs_no_texto(txt):
+    """Números de processo (proc_norm) citados literalmente num texto."""
+    return list(dict.fromkeys(
+        re.findall(r"\d{4,5}\.\d{6}/\d{4}-\d{2}", str(txt or ""))))
+
+
+def _conduta_analise_do_proc(pn):
+    """Reúne a análise IA + metadados de um processo julgado (conduta.db)."""
+    out = {"proc_norm": pn}
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return out
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        r = con.execute("SELECT analise FROM analises WHERE proc_norm=? AND "
+                        "tipo='julgado'", (pn,)).fetchone()
+        try:
+            out["analise"] = json.loads(r[0]) if r and r[0] else {}
+        except (ValueError, TypeError):
+            out["analise"] = {}
+        ev = con.execute("SELECT diretor, data_iso, valor FROM eventos WHERE "
+                         "evento='julgou' AND proc_norm=? LIMIT 1", (pn,)).fetchone()
+        if ev:
+            out["relator"], out["data"], out["valor"] = ev[0], ev[1], ev[2]
+        jp = con.execute("SELECT n_pf, n_empresa, n_financeira FROM julgado_perfil "
+                         "WHERE proc_norm=?", (pn,)).fetchone()
+        if jp:
+            out["n_pf"], out["n_empresa"], out["n_financeira"] = jp
+        out["temas"] = [t[0] for t in con.execute(
+            "SELECT tema FROM caso_tema WHERE proc_norm=? AND dominante=1", (pn,))]
+    except Exception:
+        pass
+    con.close()
+    return out
+
+
+@st.dialog("Análise do caso (IA)", width="large")
+def dialog_conduta_analise(pn):
+    """Popup com a análise IA completa de um processo julgado — acessível a
+    partir de cada hipótese do relatório de inconsistências."""
+    dd = _conduta_analise_do_proc(pn)
+    a = dd.get("analise") or {}
+    st.markdown(f"### Processo nº {pn}")
+    meta = []
+    if dd.get("relator"):
+        meta.append(f"**Relator:** {dd['relator']}")
+    if dd.get("data"):
+        meta.append(f"**Julgado em:** {dd['data']}")
+    if dd.get("valor"):
+        meta.append(f"**Multas:** R$ {dd['valor']:,.0f}".replace(",", "."))
+    if meta:
+        st.markdown("  ·  ".join(meta))
+    cls = []
+    if (dd.get("n_financeira") or 0) > 0:
+        cls.append(f"{int(dd['n_financeira'])} inst. financeira(s)")
+    if (dd.get("n_empresa") or 0) > 0:
+        cls.append(f"{int(dd['n_empresa'])} empresa(s)")
+    if (dd.get("n_pf") or 0) > 0:
+        cls.append(f"{int(dd['n_pf'])} pessoa(s) física(s)")
+    if cls:
+        st.caption("Réus: " + ", ".join(cls))
+    sev = str(a.get("severidade") or "").strip()
+    if sev and sev != "-":
+        cor = {"alta": "🔴", "media": "🟠", "média": "🟠",
+               "baixa": "🟢"}.get(sev.lower(), "⚪")
+        st.markdown(f"**Severidade (IA):** {cor} `{sev}`")
+    if not a:
+        st.info("A análise de IA deste processo ainda não está disponível na "
+                "base de conduta.")
+    for rot, campo in [("Resumo", "resumo"), ("Conduta imputada", "conduta_imputada"),
+                       ("Desfecho", "desfecho"), ("Racional da decisão", "racional"),
+                       ("Conduta do relator", "conduta_relator")]:
+        v = str(a.get(campo) or "").strip()
+        if v and v != "-":
+            st.markdown(f"**{rot}:**")
+            st.write(v)
+    temas = [t for t in dd.get("temas", []) if t and t != "outros"]
+    if temas:
+        st.caption("Temas: " + ", ".join(_TEMA_LABEL.get(t, t) for t in temas))
+    pubs = _pubs_do_processo(pn)
+    if pubs:
+        st.markdown(f"**📑 Publicações no Diário (SEI) ({len(pubs)}):**")
+        tp = pd.DataFrame([{"Data": p["data"], "Tipo": p["tipo"],
+                            "Unidade": p["unidade"], "Link": p["link"]}
+                           for p in pubs[:40]])
+        tabela(tp, datas=["Data"], use_container_width=True, hide_index=True,
+               column_config={"Link": st.column_config.LinkColumn(
+                   "Link", display_text="abrir ↗")})
+
+
+def _btn_processos(g, keyprefix):
+    """Renderiza cada processo de um grupo como botão que abre sua análise IA."""
+    for i, (_, row) in enumerate(g.iterrows()):
+        pn = row["Processo"]
+        val = row.get("Multa (R$)", 0) or 0
+        extra = []
+        if row.get("Data"):
+            extra.append(str(row["Data"])[:10])
+        if val:
+            extra.append(f"R$ {val:,.0f}".replace(",", "."))
+        lab = f"📄 {pn}" + (" · " + " · ".join(extra) if extra else "")
+        if st.button(lab, key=f"{keyprefix}_{i}_{pn}", use_container_width=True):
+            dialog_conduta_analise(pn)
+
+
 @st.cache_data(ttl=600)
 def _inconsistencias_diretor(d):
     """Detector determinístico: julgados do diretor onde o MESMO tema teve
@@ -4201,11 +4531,11 @@ def render_ficha_diretor():
                 v = str(v or "").strip()
                 if v and v != "-":
                     st.markdown(f"**{rot}:** {v}")
-            inc = dossie.get("incoerencias") or []
-            if inc:
-                st.markdown("**⚠️ Incoerências (hipóteses a verificar):**")
-                for c in (inc if isinstance(inc, list) else [inc]):
-                    st.markdown(f"- {c}")
+            if dossie.get("incoerencias"):
+                st.caption("⚠️ **Incoerências e hipóteses a verificar:** veja o "
+                           "*Relatório de inconsistências* ao final — lá cada "
+                           "hipótese abre os processos antagônicos e a análise "
+                           "de cada um.")
             ck = dossie.get("casos_marcantes") or []
             if ck:
                 st.markdown("**Casos marcantes:** " + " · ".join(str(x) for x in ck))
@@ -4339,37 +4669,74 @@ def render_ficha_diretor():
     # ---- RELATÓRIO DE INCONSISTÊNCIAS -------------------------------------
     st.divider()
     st.markdown("### ⚠️ Relatório de inconsistências")
-    st.caption("Pontos onde a atuação do diretor merece escrutínio. As hipóteses "
-               "são indícios a verificar — casos podem ter especificidades que os "
-               "dados não capturam.")
-    inc = dossie.get("incoerencias") if dossie else None
-    if inc:
-        st.markdown("**🧠 Hipóteses levantadas (IA):**")
-        for c in (inc if isinstance(inc, list) else [inc]):
-            if str(c).strip() and str(c).strip() != "-":
-                st.markdown(f"- {c}")
+    st.caption("Cada hipótese abaixo é **clicável**: abra para ver os processos "
+               "antagônicos e, em cada um, a análise completa. São indícios a "
+               "verificar — casos podem ter especificidades que os dados não "
+               "capturam.")
     df_inc, clusters = _inconsistencias_diretor(d)
+    inc = (dossie.get("incoerencias") if dossie else None) or []
+    inc = [c for c in (inc if isinstance(inc, list) else [inc])
+           if str(c).strip() and str(c).strip() != "-"]
+    algo = False
+    # A) hipóteses qualitativas do agente -> casos concretos do(s) tema(s)
+    if inc:
+        algo = True
+        st.markdown("**🧠 Hipóteses do agente** — clique para abrir os casos:")
+        for i, c in enumerate(inc):
+            procs_c = _procs_no_texto(c)
+            temas_h = [t for t in _tema_de_texto(c)
+                       if len(df_inc) and (df_inc["tema"] == t).any()]
+            with st.expander(f"🔎 {c}"):
+                mostrou = False
+                if procs_c:
+                    mostrou = True
+                    st.markdown("**📌 Processos citados nesta hipótese** "
+                                "(clique para a análise):")
+                    _btn_processos(pd.DataFrame({"Processo": procs_c}), f"hipp{i}")
+                for t in temas_h:
+                    g = df_inc[df_inc["tema"] == t].sort_values(
+                        ["Severidade", "Data"])
+                    if not len(g):
+                        continue
+                    mostrou = True
+                    st.markdown(f"**{_TEMA_LABEL.get(t, t)}** — {len(g)} "
+                                f"julgado(s) deste diretor (clique para a análise):")
+                    _btn_processos(g, f"hip{i}_{t}")
+                if not mostrou:
+                    st.caption("Observação qualitativa — sem processo citado nem "
+                               "tema mapeável automaticamente. Use as disparidades "
+                               "abaixo e os cruzamentos acima para investigar.")
+    # B) disparidades determinísticas: mesma tese, severidades opostas
     if clusters:
-        st.markdown(f"**📊 Casos comparáveis com desfecho díspar "
-                    f"({len(clusters)} tema(s)):**")
-        st.caption("Mesmo tema julgado por este diretor com severidades **opostas** "
-                   "(alta e baixa) — a disparidade fica visível lado a lado.")
+        algo = True
+        st.markdown("**📊 Disparidades nos dados** — mesma tese julgada por este "
+                    "diretor com severidades **opostas**:")
         for tema, g in clusters:
+            alta = g[g["Severidade"] == "alta"]
+            baixa = g[g["Severidade"] == "baixa"]
             faixa = g[g["Multa (R$)"] > 0]["Multa (R$)"]
-            rng = (f" · multas de R$ {faixa.min():,.0f} a R$ {faixa.max():,.0f}"
+            rng = (f" · R$ {faixa.min():,.0f} a R$ {faixa.max():,.0f}"
                    .replace(",", ".")) if len(faixa) else ""
-            with st.expander(f"⚠️ {_TEMA_LABEL.get(tema, tema)} — {len(g)} julgados, "
-                             f"severidades divergentes{rng}"):
-                st.dataframe(
-                    g[["Data", "Processo", "Réu", "Severidade", "Multa (R$)",
-                       "Conduta", "Desfecho"]].sort_values(
-                        ["Severidade", "Data"]),
-                    use_container_width=True, hide_index=True)
-    elif len(df_inc):
-        st.success("Nenhuma divergência de severidade dentro de um mesmo tema "
-                   "detectada (na cobertura atual 2022–2026).")
+            with st.expander(f"⚠️ {_TEMA_LABEL.get(tema, tema)} — "
+                             f"{len(alta)} grave(s) × {len(baixa)} brando(s){rng}"):
+                st.caption("O mesmo tipo de infração recebeu deste diretor "
+                           "severidades opostas. Compare os polos antagônicos — "
+                           "clique em qualquer processo para a análise:")
+                cG, cB = st.columns(2)
+                with cG:
+                    st.markdown("⬆️ **Tratou como mais GRAVE** (severidade alta)")
+                    _btn_processos(alta, f"cl_{tema}_alta")
+                with cB:
+                    st.markdown("⬇️ **Tratou como mais BRANDO** (severidade baixa)")
+                    _btn_processos(baixa, f"cl_{tema}_baixa")
+    if not algo:
+        if len(df_inc):
+            st.success("Nenhuma divergência de severidade dentro de um mesmo tema "
+                       "detectada (na cobertura atual 2022–2026).")
+        else:
+            st.info("Ainda não há julgados com análise IA para este diretor.")
     st.caption("A varredura da jurisprudência completa (1999–2025) aprofundará "
-               "este relatório: mesma tese com dosimetria díspar ao longo dos anos, "
+               "este relatório: mesma tese com dosimetria díspar ao longo dos anos "
                "e tratamento diferente entre classes de réu no mesmo caso.")
 
 

@@ -15,9 +15,16 @@ Transparencia, cujo CPF vem mascarado).
 Tambem preenche a data dos boletins antigos cujo titulo/arquivo nao a traziam,
 usando o cabecalho do texto ("Edicao N, de DD de mes de AAAA").
 
+Fase C (organograma): extrai MOVIMENTOS DE CARGO das secoes NOMEACAO /
+EXONERACAO / DESIGNACAO (servidor, funcao/cargo comissionado, codigo
+CCE/FCE/FCPE/DAS/FG, unidade+sigla, portaria e datas) -> tabela movimentos.
+Inclui os cargos estatutarios (Diretor/Presidente da CVM).
+
 Uso:
-  python boletim_pessoal_extrair.py datas      # preenche datas faltantes
-  python boletim_pessoal_extrair.py viagens    # extrai viagens -> tabela viagens
+  python boletim_pessoal_extrair.py datas       # preenche datas faltantes
+  python boletim_pessoal_extrair.py viagens     # viagens -> tabela viagens
+  python boletim_pessoal_extrair.py movimentos  # movimentos -> tabela movimentos
+  python boletim_pessoal_extrair.py tudo        # viagens + movimentos
   python boletim_pessoal_extrair.py stats
 """
 import os
@@ -49,8 +56,24 @@ def conectar():
         valor_diarias TEXT, pcdp TEXT, processo TEXT, boletim_numero TEXT,
         boletim_data_iso TEXT, link_boletim TEXT, coletado_em TEXT)""")
     con.execute("CREATE INDEX IF NOT EXISTS ix_vg_key ON viagens(servidor_key)")
+    con.execute("""CREATE TABLE IF NOT EXISTS movimentos(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, tipo TEXT, servidor_nome TEXT,
+        servidor_key TEXT, cargo_efetivo TEXT, funcao TEXT, codigo TEXT,
+        sigla TEXT, unidade TEXT, matricula TEXT, portaria TEXT,
+        data_ato_iso TEXT, data_efeito TEXT, boletim_numero TEXT,
+        boletim_data_iso TEXT, link_boletim TEXT, trecho TEXT, coletado_em TEXT)""")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_mv_key ON movimentos(servidor_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_mv_sig ON movimentos(sigla)")
     con.commit()
     return con
+
+
+def _data_iso(d, mes, a):
+    mo = MESES.get(str(mes or "").lower())
+    try:
+        return f"{int(a):04d}-{mo:02d}-{int(d):02d}" if mo else ""
+    except (ValueError, TypeError):
+        return ""
 
 
 def _key(nome):
@@ -167,6 +190,110 @@ def extrair_viagens(con):
     print(f"[extrair] viagens: {total}")
 
 
+VERBO_MOV = {"nomeacao": "nomead", "exoneracao": "exonerad",
+             "designacao": "designad"}
+
+
+def _valida_nome(n):
+    """Aceita so nomes plausiveis em maiuscula (evita capturar lixo)."""
+    if not (5 <= len(n) <= 70) or re.search(r"\d", n):
+        return False
+    letras = [c for c in n if c.isalpha()]
+    return len(letras) >= 4 and sum(1 for c in letras
+                                    if c.upper() == c) / len(letras) > 0.7
+
+
+def _funcao_codigo(p):
+    """Funcao comissionada + codigo (CCE/FCE/FCPE/DAS/FG) ou cargo estatutario."""
+    m = re.search(r"(?:cargo comissionado executivo|fun[cç][aã]o comissionada "
+                  r"executiva|fun[cç][aã]o comissionada do poder executivo|"
+                  r"cargo em comiss[aã]o|fun[cç][aã]o gratificada|"
+                  r"fun[cç][aã]o comissionada|fun[cç][aã]o)\s+de\s+(.+?),\s*"
+                  r"(CCE|FCE|FCPE|DAS|FG)\s*-?\s*([\d.]+)", p, re.I)
+    if m:
+        return m.group(1).strip(), f"{m.group(2).upper()} {m.group(3)}"
+    m = re.search(r"cargo de\s+(Diretor[a]?|Presidente|Procurador[a]?"
+                  r"(?:[- ]Geral)?)\b[^,.]*", p, re.I)
+    if m:
+        cod = re.search(r"\b(CCE|FCE|DAS)\s*([\d.]+)", p)
+        f = re.sub(r"\s+", " ", m.group(0)[len("cargo de"):]).strip()
+        return f, (f"{cod.group(1).upper()} {cod.group(2)}" if cod else "")
+    return "", ""
+
+
+def _movimentos_sec(sec, tipo):
+    out = []
+    for par in re.split(r"\n\s*\n", sec):
+        p = re.sub(r"\s+", " ", par).strip()
+        if VERBO_MOV[tipo] not in p.lower():
+            continue
+        mn = re.match(r"([A-ZÀ-Ú][A-ZÀ-Ú'’.\- ]{3,}?),", p)
+        if not mn or not _valida_nome(mn.group(1).strip()):
+            continue
+        nome = re.sub(r"\s+", " ", mn.group(1)).strip()
+        funcao, codigo = _funcao_codigo(p)
+        mce = re.search(r"(?:ocupante do |d[oe] )?cargo efetivo de\s+(.+?),", p, re.I)
+        cargo_ef = mce.group(1).strip() if mce else ""
+        if not cargo_ef:
+            m2 = re.match(r"[^,]+,\s*(Inspetora?\s+Federal do Mercado de Capitais|"
+                          r"Agente Executivo|Analista[^,]*|Procurador[^,]*)", p)
+            cargo_ef = m2.group(1).strip() if m2 else ""
+        munid = re.search(
+            r"((?:Superintend[eê]ncia|Ger[eê]ncia|Divis[aã]o|Assessoria|Presid[eê]ncia|"
+            r"Colegiado|Coordena[cç][aã]o|Procuradoria|Auditoria|Gabinete|Secretaria|"
+            r"Comiss[aã]o|N[uú]cleo|Escrit[oó]rio|Ouvidoria|Chefia|Se[cç][aã]o|"
+            r"Centro)[^()]*?)\s*\(([A-Z][A-Z0-9]{1,7}(?:[-/][A-Z0-9]+)*)\)", p)
+        unidade = re.sub(r"[ ,]+$", "", munid.group(1).strip()) if munid else ""
+        sigla = munid.group(2) if munid else ""
+        if not sigla and re.match(r"(Diretor|Presidente)", funcao, re.I):
+            sigla, unidade = "COL", "Colegiado (Diretoria)"
+        mmat = re.search(r"Siape\s*n[ºo°.]?\s*([\d]+)", p, re.I)
+        mport = re.search(r"Portaria\s+([A-Z/]*?\d+/?\d*)", p)
+        mdato = re.search(r"Portaria[^,]*,\s*de\s+(\d{1,2})[ºo]?\s+de\s+([a-zçãé]+)\s+"
+                          r"de\s+(\d{4})", p, re.I)
+        mef = re.search(r"a partir d[oe]\s+(?:dia\s+)?(\d{1,2}[ºo]?\s+de\s+[a-zçãé]+\s+"
+                        r"de\s+\d{4})", p, re.I)
+        out.append({
+            "tipo": tipo, "servidor_nome": nome, "cargo_efetivo": cargo_ef,
+            "funcao": funcao, "codigo": codigo, "sigla": sigla, "unidade": unidade,
+            "matricula": mmat.group(1) if mmat else "",
+            "portaria": mport.group(1) if mport else "",
+            "data_ato_iso": _data_iso(*mdato.groups()) if mdato else "",
+            "data_efeito": re.sub(r"\s+", " ", mef.group(1)) if mef else "",
+            "trecho": p[:400]})
+    return out
+
+
+def extrair_movimentos(con):
+    """NOMEACAO / EXONERACAO / DESIGNACAO -> tabela movimentos (organograma)."""
+    con.execute("DELETE FROM movimentos")
+    hoje = dt.date.today().isoformat()
+    rows = con.execute("SELECT numero, data_iso, pdf_url, texto FROM boletins "
+                       "WHERE texto IS NOT NULL AND texto<>''").fetchall()
+    total = 0
+    for numero, data_iso, url, texto in rows:
+        itens = []
+        for cab, tipo in [(r"NOMEA[CÇ][AÃ]O", "nomeacao"),
+                          (r"EXONERA[CÇ][AÃ]O", "exoneracao"),
+                          (r"DESIGNA[CÇ][AÃ]O", "designacao")]:
+            sec = _secao(texto, cab)
+            if sec:
+                itens += _movimentos_sec(sec, tipo)
+        for it in itens:
+            con.execute(
+                "INSERT INTO movimentos(tipo,servidor_nome,servidor_key,"
+                "cargo_efetivo,funcao,codigo,sigla,unidade,matricula,portaria,"
+                "data_ato_iso,data_efeito,boletim_numero,boletim_data_iso,"
+                "link_boletim,trecho,coletado_em) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (it["tipo"], it["servidor_nome"], _key(it["servidor_nome"]),
+                 it["cargo_efetivo"], it["funcao"], it["codigo"], it["sigla"],
+                 it["unidade"], it["matricula"], it["portaria"], it["data_ato_iso"],
+                 it["data_efeito"], numero, data_iso, url, it["trecho"], hoje))
+            total += 1
+    con.commit()
+    print(f"[extrair] movimentos: {total}")
+
+
 def stats(con=None):
     own = con is None
     con = con or conectar()
@@ -175,6 +302,18 @@ def stats(con=None):
         print(f"  viagens {t}: {n}")
     ns = con.execute("SELECT COUNT(DISTINCT servidor_key) FROM viagens").fetchone()[0]
     print(f"  servidores distintos em viagens: {ns}")
+    try:
+        for t in ("nomeacao", "exoneracao", "designacao"):
+            n = con.execute("SELECT COUNT(*) FROM movimentos WHERE tipo=?",
+                            (t,)).fetchone()[0]
+            print(f"  movimentos {t}: {n}")
+        nm = con.execute("SELECT COUNT(DISTINCT servidor_key) FROM movimentos"
+                         ).fetchone()[0]
+        nsig = con.execute("SELECT COUNT(DISTINCT sigla) FROM movimentos WHERE "
+                           "sigla<>''").fetchone()[0]
+        print(f"  servidores distintos em movimentos: {nm} | unidades (siglas): {nsig}")
+    except sqlite3.OperationalError:
+        pass
     if own:
         con.close()
 
@@ -187,6 +326,15 @@ if __name__ == "__main__":
     elif cmd == "viagens":
         preencher_datas(c)
         extrair_viagens(c)
+        stats(c)
+    elif cmd == "movimentos":
+        preencher_datas(c)
+        extrair_movimentos(c)
+        stats(c)
+    elif cmd == "tudo":
+        preencher_datas(c)
+        extrair_viagens(c)
+        extrair_movimentos(c)
         stats(c)
     else:
         stats(c)

@@ -36,7 +36,7 @@ jobs:
           python decisoes_baixar.py
           python atas_colegiado_texto.py
           python boletim_pessoal_baixar.py atualizar
-          python boletim_pessoal_extrair.py viagens
+          python boletim_pessoal_extrair.py tudo
           python scraper.py revisar
           python conduta_build.py build
           true
