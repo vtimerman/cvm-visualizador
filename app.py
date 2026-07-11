@@ -2,6 +2,7 @@
 """Visualizador das Audiencias Particulares da CVM."""
 import os
 import re
+import sys
 import sqlite3
 import json
 import unicodedata
@@ -545,6 +546,7 @@ def dialog_processo(row, acus):
         f'<h2>Processo Sancionador nº {e(row["numero"])}</h2>'
         f'<table>{corpo}</table>'
         f'{_analise_html(_mapa_analises().get((_norm_proc(row["numero"]), "julgado")), e)}'
+        f'{_teses_html(_norm_proc(row["numero"]), e)}'
         f'{tl_html}'
         f'{julg_html}'
         f'<h3>Acusados ({len(ac)})</h3>'
@@ -3354,6 +3356,112 @@ def _conduta_resumo():
     return df
 
 
+@st.cache_data(ttl=600)
+def _agentes_tese():
+    """tema -> dossie do agente especialista; e proc_norm -> temas do caso."""
+    ags, casos = {}, {}
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return ags, casos
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        for tema, d, n in con.execute(
+                "SELECT tema, dossie, n_casos FROM agentes_tese WHERE ai_feito=1"):
+            try:
+                ags[tema] = {**json.loads(d), "_n": n}
+            except (ValueError, TypeError):
+                pass
+        for pn, tema in con.execute(
+                "SELECT proc_norm, tema FROM caso_tema WHERE dominante=1"):
+            casos.setdefault(pn, []).append(tema)
+    except Exception:
+        pass
+    con.close()
+    return ags, casos
+
+
+_TEMA_LABEL = {
+    "insider_trading": "Insider trading", "manipulacao_fraude": "Manipulação/fraude",
+    "fato_relevante_dri": "Fato relevante / DRI",
+    "dever_diligencia_adm": "Dever de diligência (adm.)",
+    "abuso_controle": "Abuso de controle", "carteira_irregular": "Carteira irregular",
+    "fundos_investimento": "Fundos", "ofertas_publicas": "Ofertas públicas",
+    "auditoria": "Auditoria", "intermediarios": "Intermediários",
+    "informacoes_periodicas": "Informações periódicas",
+    "assembleia_conflito": "Assembleia / conflito",
+    "agentes_autonomos": "Agentes autônomos", "rito_processual": "Rito/prescrição",
+    "outros": "Outros"}
+
+
+def _teses_html(pn, e):
+    """No popup do processo: temas do caso + tese vigente do agente especialista."""
+    ags, casos = _agentes_tese()
+    temas = [t for t in casos.get(pn, []) if t != "outros"]
+    if not temas:
+        return ""
+    blocos = ""
+    for t in temas:
+        a = ags.get(t, {})
+        tv = str(a.get("tese_vigente") or "").strip()
+        dm = str(a.get("dosimetria") or "").strip()
+        blocos += (f'<tr><td class="upperHeader" style="white-space:nowrap">'
+                   f'{e(_TEMA_LABEL.get(t, t))}</td><td>'
+                   + (f'<b>Tese vigente:</b> {e(tv[:400])}' if tv else "")
+                   + (f'<br><b>Dosimetria:</b> {e(dm[:250])}' if dm else "")
+                   + '</td></tr>')
+    return ('<h3>🧠 Teses aplicáveis (agente especialista)</h3>'
+            '<p style="font-size:11px">O caso foi classificado nestes temas; '
+            'segue o entendimento consolidado do Colegiado (base dos agentes de '
+            'tese). Confira sempre no inteiro teor.</p>'
+            f'<table>{blocos}</table>')
+
+
+def render_agentes_tese():
+    st.markdown("#### 🧠 Agentes especialistas por tese")
+    ags, casos = _agentes_tese()
+    if not ags:
+        st.info("⏳ Os agentes de tese ainda estão sendo construídos.")
+        return
+    st.caption(f"{len(ags)} temas com entendimento consolidado. Quando chega um "
+               "processo novo, ele é classificado no tema e o agente da tese "
+               "correspondente é consultado.")
+    # roteador: cola o objeto de um caso novo -> tema(s)
+    with st.expander("🧭 Roteador — classifique um caso novo"):
+        txt = st.text_area("Cole o objeto/ementa do processo", key="rot_txt",
+                           height=100)
+        if txt.strip():
+            import subprocess
+            try:
+                out = subprocess.run(
+                    [sys.executable, os.path.join(os.path.dirname(
+                        os.path.abspath(__file__)), "agentes_tese.py"),
+                     "roteia", txt], capture_output=True, text=True, timeout=30)
+                st.code(out.stdout.strip() or "outros")
+            except Exception as ex:
+                st.caption(f"(roteador indisponível: {ex})")
+    tema = st.selectbox("Ver agente do tema", sorted(ags),
+                        format_func=lambda t: f"{_TEMA_LABEL.get(t, t)} "
+                        f"({ags[t].get('_n', 0)} casos)", key="ag_tema",
+                        index=None, placeholder="escolha um tema…")
+    if tema:
+        a = ags[tema]
+        for rot, campo in [("Tese vigente", "tese_vigente"),
+                           ("Evolução", "evolucao"), ("Dosimetria", "dosimetria"),
+                           ("Posição por diretor", "posicao_por_diretor"),
+                           ("Padrão de TC", "tc_padrao")]:
+            v = str(a.get(campo) or "").strip()
+            if v and v != "-":
+                st.markdown(f"**{rot}:** {v}")
+        ck = a.get("casos_chave") or []
+        if ck:
+            st.markdown("**Casos-chave:**")
+            for c in ck:
+                st.markdown(f"- {c}")
+        sp = str(a.get("system_prompt") or "").strip()
+        if sp:
+            with st.expander("🤖 System prompt do agente de tese (copiar)"):
+                st.code(sp, language=None)
+
+
 def _analise_html(a, e):
     """Bloco HTML da análise IA para o popup do processo."""
     if not a:
@@ -4035,7 +4143,8 @@ def render_colegiado():
     st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
     visao = st.segmented_control(
         "Seção", ["📜 Decisões, Atas e Votos", "🎯 Ficha do diretor",
-                  "📰 Informativos", "👥 Quem é Quem", "📋 Atas do CGE"],
+                  "🧠 Agentes de tese", "📰 Informativos", "👥 Quem é Quem",
+                  "📋 Atas do CGE"],
         key="col_nav", default="📜 Decisões, Atas e Votos",
         label_visibility="collapsed")
     st.divider()
@@ -4043,6 +4152,8 @@ def render_colegiado():
         render_decisoes()
     elif visao == "🎯 Ficha do diretor":
         render_ficha_diretor()
+    elif visao == "🧠 Agentes de tese":
+        render_agentes_tese()
     elif visao == "📰 Informativos":
         render_informativos()
     elif visao == "👥 Quem é Quem":
