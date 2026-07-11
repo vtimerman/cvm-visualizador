@@ -4175,6 +4175,26 @@ def render_ficha_diretor():
         st.markdown("**Julgamentos por ano:**")
         anos = julgs["data_iso"].str[:4].value_counts().sort_index()
         st.bar_chart(anos)
+    # ---- severidade POR perfil de réu (o cruzamento) ----------------------
+    if len(jp):
+        jp["severidade"] = jp["proc_norm"].map(
+            lambda pn: str((ana.get(pn) or {}).get("severidade") or "?").lower()
+            .replace("média", "media"))
+        ct = pd.crosstab(jp["classe"], jp["severidade"])
+        ordem = [c for c in ["alta", "media", "baixa", "?"] if c in ct.columns]
+        ct = ct[ordem + [c for c in ct.columns if c not in ordem]]
+        st.markdown("**🎯 Severidade POR perfil de réu** — revela se instituições/"
+                    "empresas recebem tratamento diferente das pessoas físicas:")
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            # % por classe (linha soma 100%) para comparar entre perfis
+            pct = ct.div(ct.sum(axis=1), axis=0).mul(100).round(0)
+            st.dataframe(pct.rename(columns=lambda c: f"{c} %"),
+                         use_container_width=True)
+        with c2:
+            st.bar_chart(ct)
+        st.caption(f"Contagem de casos por severidade e tipo de réu "
+                   f"(n={int(ct.values.sum())} julgados com perfil e severidade).")
     # ---- estoque: o que deixou de pautar ----------------------------------
     if len(est):
         st.markdown(f"**📥 Estoque sem julgamento ({len(est)}) — o que ainda "
