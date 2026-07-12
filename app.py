@@ -5008,6 +5008,63 @@ def _mandato_ate():
     return out
 
 
+@st.cache_data(ttl=300)
+def _presidencia_plena():
+    """{pessoa: data em que passou a Presidente PLENO} — detectada pela
+    assinatura dos boletins (primeira vez que assina 'Presidente' sem 'Interino'
+    APÓS a última assinatura como 'Presidente Interino')."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return {}
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    sig = {}
+    for data, texto in con.execute("SELECT data_iso, texto FROM boletins WHERE "
+                                   "data_iso<>'' AND texto<>''"):
+        flat = re.sub(r"\s+", " ", texto)
+        for m in re.finditer(r"[Aa]ssinad[oa][^.\n]{0,40}por\s+([A-ZÀ-Ú]"
+                             r"[A-ZÀ-Ú ]{6,55}?)\s+(Presidente Interino|Presidente)"
+                             r"\b", flat):
+            k = _pk_nome(m.group(1))
+            role = "int" if "Interino" in m.group(2) else "ple"
+            sig.setdefault(k, {"int": [], "ple": []})[role].append(data)
+    con.close()
+    out = {}
+    for k, d in sig.items():
+        if not d["ple"]:
+            continue
+        ultimo_int = max(d["int"]) if d["int"] else ""
+        aposteriori = sorted(x for x in d["ple"] if x > ultimo_int)
+        if len(aposteriori) >= 2:   # sustentado (evita 'Presidente' de substituto)
+            out[k] = aposteriori[0]
+    return out
+
+
+def _role_intervals(inicio, fim, mine, pleno_start):
+    """Divide [inicio, fim] em intervalos por papel (Diretor × Presidência
+    interina × Presidente), sem sobreposição."""
+    out = {"Diretor(a)": [], "Presidência (interina)": [], "Presidente": []}
+    cap = fim
+    if pleno_start and inicio < pleno_start < fim:
+        out["Presidente"] = [(pleno_start, fim)]
+        cap = pleno_start
+    interina = []
+    for a, b in mine:
+        a2, b2 = max(a, inicio), min(b, cap)
+        if a2 < b2:
+            interina.append((a2, b2))
+    interina.sort()
+    out["Presidência (interina)"] = interina
+    ocupado = sorted(interina + out["Presidente"])
+    cur, dire = inicio, []
+    for a, b in ocupado:
+        if cur < a:
+            dire.append((cur, a))
+        cur = max(cur, b)
+    if cur < fim:
+        dire.append((cur, fim))
+    out["Diretor(a)"] = dire
+    return out
+
+
 def _ativo_recente(con, nome, skeys, meses=15):
     """A pessoa mostra atividade nos últimos ~15 meses? (viagem, ou assinatura/
     citação como Presidente/Diretor num boletim recente.) Distingue quem foi
@@ -5054,6 +5111,7 @@ def _diretores_mandatos():
     hoje = dt.date.today()
     interinos = _interino_periodos()
     mate = _mandato_ate()
+    plenos = _presidencia_plena()
     pessoas = {}
     for t, nome, data, fun in stat:
         p = pessoas.setdefault(_pk_nome(nome),
@@ -5101,33 +5159,52 @@ def _diretores_mandatos():
             a2, b2 = max(a, inicio), min(b, fim)
             if a2 < b2:
                 mine.append((a2, b2))
-        inter_bdays = sum(_busdays(a, b) for a, b in mine)
-        total_bdays = _busdays(inicio, fim)
+        ps = plenos.get(k)
+        # presidência plena por assinatura só p/ diretor ATUAL (evita confundir
+        # substituições eventuais de ex-diretores com virada de presidencia)
+        if ps and status == "Em exercício":
+            ps = max(ps, inicio)
+            if ps >= fim:
+                ps = None
+        else:
+            ps = None
 
-        def bloco(papel, ini_lbl, bdias, dentro):
+        def bloco(papel, intervals):
+            if not intervals:
+                return None
+            bdias = sum(_busdays(a, b) for a, b in intervals)
+
+            def dentro(d):
+                return any(a <= d <= b for a, b in intervals)
             sub = [x for x in vg if dentro(x[2] or "")]
             dv = sum(_dias_periodo(x[1]) for x in sub
                      if x[0] == "afastamento_pais")
             nv = sum(1 for x in sub if x[0] == "afastamento_pais")
             custo = sum(_parse_valor(x[3]) for x in sub)
             return {"Diretor(a)": p["nome"].title(), "Papel": papel,
-                    "Início": ini_lbl, "Dias úteis (mandato)": bdias, "Viagens": nv,
+                    "Início": min(a for a, _ in intervals),
+                    "Dias úteis (mandato)": bdias, "Viagens": nv,
                     "Dias viajando": dv,
                     "% do mandato viajando":
                     round(100 * dv / bdias, 1) if bdias else 0.0,
                     "Custo diárias (R$)": round(custo, 2), "Status": status}
 
-        def in_i(d):
-            return any(a <= d <= b for a, b in mine)
-
-        if mine and inter_bdays > 0:
-            recs.append(bloco("Diretor(a)", inicio, total_bdays - inter_bdays,
-                              lambda d: not in_i(d)))
-            recs.append(bloco("Presidência (interina)", min(a for a, _ in mine),
-                              inter_bdays, in_i))
+        if p["pres"]:
+            # presidente estatutário: mandato inteiro como Presidente
+            r = bloco("Presidente", [(inicio, fim)])
+            if r:
+                recs.append(r)
+        elif mine or ps:
+            # diretor que exerceu a presidência (interina e/ou plena — ex.: Otto)
+            segs = _role_intervals(inicio, fim, mine, ps)
+            for papel in ("Diretor(a)", "Presidência (interina)", "Presidente"):
+                r = bloco(papel, segs.get(papel, []))
+                if r:
+                    recs.append(r)
         else:
-            recs.append(bloco("Presidente" if p["pres"] else "Diretor(a)",
-                              inicio, total_bdays, lambda d: True))
+            r = bloco("Diretor(a)", [(inicio, fim)])
+            if r:
+                recs.append(r)
     con.close()
     if not recs:
         return pd.DataFrame()

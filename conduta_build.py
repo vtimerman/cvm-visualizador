@@ -116,7 +116,9 @@ def conectar():
         dias INTEGER, situacao TEXT, PRIMARY KEY (diretor, proc_norm))""")
     con.execute("""CREATE TABLE IF NOT EXISTS alinhamentos(
         id INTEGER PRIMARY KEY AUTOINCREMENT, diretor_a TEXT, tipo TEXT,
-        diretor_b TEXT, processo TEXT, data_iso TEXT, trecho TEXT)""")
+        diretor_b TEXT, processo TEXT, data_iso TEXT, trecho TEXT, fonte TEXT)""")
+    if "fonte" not in [c[1] for c in con.execute("PRAGMA table_info(alinhamentos)")]:
+        con.execute("ALTER TABLE alinhamentos ADD COLUMN fonte TEXT")
     con.commit()
     return con
 
@@ -133,7 +135,8 @@ def _diretores_citados(texto):
 def build():
     con = conectar()
     con.execute("DELETE FROM eventos")
-    con.execute("DELETE FROM alinhamentos")
+    # preserva as divergencias mineradas da jurisprudencia (juris_divergencias.py)
+    con.execute("DELETE FROM alinhamentos WHERE fonte IS NULL OR fonte<>'juris'")
     ins = ("INSERT INTO eventos(diretor,papel,evento,processo,proc_norm,data_iso,"
            "valor,detalhe,fonte) VALUES(?,?,?,?,?,?,?,?,?)")
 
@@ -235,7 +238,8 @@ def build():
                     for w in citados - vencidos:
                         con.execute(
                             "INSERT INTO alinhamentos(diretor_a,tipo,diretor_b,"
-                            "processo,data_iso,trecho) VALUES(?,?,?,?,?,?)",
+                            "processo,data_iso,trecho,fonte) VALUES(?,?,?,?,?,?,"
+                            "'atas')",
                             (v, "divergiu_de", w, proc, data_iso, trecho_div))
             # correlacao: pedido de vista SOBRE relatoria de outro diretor
             if drel:
@@ -246,7 +250,8 @@ def build():
                     if d and d != drel:
                         con.execute(
                             "INSERT INTO alinhamentos(diretor_a,tipo,diretor_b,"
-                            "processo,data_iso,trecho) VALUES(?,?,?,?,?,?)",
+                            "processo,data_iso,trecho,fonte) VALUES(?,?,?,?,?,?,"
+                            "'atas')",
                             (d, "pediu_vista_sobre", drel, proc, data_iso,
                              trecho_div))
             # TC aceito/rejeitado (item colegiado; valor quando citado)

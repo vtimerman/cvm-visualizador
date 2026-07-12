@@ -155,6 +155,61 @@ def aplicar_ia(caminho):
     print(f"[juris] {n} analise(s) e {nt} tese(s) aplicadas.")
 
 
+def _pdftoppm():
+    hit = shutil.which("pdftoppm")
+    if hit:
+        return hit
+    g = glob.glob(os.path.join(
+        os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages",
+        "oschwartz10612.Poppler*", "poppler-*", "Library", "bin",
+        "pdftoppm.exe"))
+    return g[0] if g else "pdftoppm"
+
+
+def _ocr_pdf(pdf_path, ocr, dpi=200):
+    with tempfile.TemporaryDirectory() as tmp:
+        pref = os.path.join(tmp, "pg")
+        subprocess.run([_pdftoppm(), "-png", "-r", str(dpi), pdf_path, pref],
+                       check=True, capture_output=True, timeout=900)
+        partes = []
+        for png in sorted(glob.glob(pref + "*.png")):
+            res, _ = ocr(png)
+            if res:
+                partes.append(" ".join(linha[1] for linha in res))
+        return "\n".join(partes).strip()
+
+
+def ocr_ilegiveis():
+    """OCR (RapidOCR) dos docs marcados ilegiveis -> atualiza juris.db."""
+    from rapidocr_onnxruntime import RapidOCR
+    con = conectar()
+    alvos = [r[0] for r in con.execute(
+        "SELECT arquivo FROM docs WHERE legivel=0 ORDER BY arquivo")]
+    print(f"[juris] OCR de {len(alvos)} doc(s) ilegivel(is)...")
+    ocr = RapidOCR()
+    hoje = dt.date.today().isoformat()
+    ok = 0
+    for arq in alvos:
+        pdf = os.path.join(FONTE, arq)
+        if not os.path.exists(pdf):
+            print(f"  ! nao encontrado: {arq}", file=sys.stderr)
+            continue
+        try:
+            texto = _ocr_pdf(pdf, ocr)
+        except Exception as e:
+            print(f"  ! erro OCR {arq}: {e}", file=sys.stderr)
+            continue
+        leg = _legivel(texto)
+        con.execute("UPDATE docs SET texto=?, chars=?, legivel=?, coletado_em=? "
+                    "WHERE arquivo=?", (texto, len(texto), leg, hoje, arq))
+        con.commit()
+        print(f"  {arq}: {len(texto)} chars {'OK' if leg else '(ainda ilegivel)'}")
+        ok += leg
+    print(f"[juris] OCR concluido: {ok}/{len(alvos)} legiveis agora.")
+    stats(con)
+    con.close()
+
+
 def exportar_conduta():
     """Backporta as analises da Fase B (juris.db, LOCAL) para a conduta.db
     (versionada), na tabela juris_analise, para o app AGREGAR as fontes e
@@ -231,5 +286,7 @@ if __name__ == "__main__":
         pendentes_lista(sys.argv[2] if len(sys.argv) > 2 else 15)
     elif cmd == "exportar_conduta":
         exportar_conduta()
+    elif cmd == "ocr":
+        ocr_ilegiveis()
     else:
         stats()
