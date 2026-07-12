@@ -3938,6 +3938,195 @@ def render_agentes_area():
             st.code(sp, language=None)
 
 
+@st.cache_data(ttl=600)
+def _agentes_unidade():
+    """sigla -> dossie institucional da SI/CTC (agentes_unidade)."""
+    ags = {}
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return ags
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS agentes_unidade(sigla TEXT "
+                    "PRIMARY KEY, nome TEXT, tipo TEXT, dossie TEXT, "
+                    "n_recursos INTEGER, ai_feito INTEGER, atualizado_em TEXT)")
+        for sig, nome, tipo, d, nr, air in con.execute(
+                "SELECT sigla, nome, tipo, dossie, n_recursos, ai_feito FROM "
+                "agentes_unidade"):
+            try:
+                ags[sig] = {**json.loads(d), "_nome": nome, "_tipo": tipo,
+                            "_nr": nr or 0, "_ia": air}
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+    con.close()
+    return ags
+
+
+@st.cache_data(ttl=600)
+def _agentes_gerencia():
+    """si_pai -> [gerências]; cada uma com sigla, nome, chefe."""
+    out = {}
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return out
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS agentes_gerencia(sigla TEXT "
+                    "PRIMARY KEY, nome TEXT, si_pai TEXT, chefe_atual TEXT, "
+                    "chefe_desde TEXT, historico TEXT, atualizado_em TEXT)")
+        for sig, nome, si, chefe, desde in con.execute(
+                "SELECT sigla, nome, si_pai, chefe_atual, chefe_desde FROM "
+                "agentes_gerencia ORDER BY sigla"):
+            out.setdefault(si or "?", []).append(
+                {"sigla": sig, "nome": nome, "chefe": chefe, "desde": desde})
+    except Exception:
+        pass
+    con.close()
+    return out
+
+
+@st.cache_data(ttl=600)
+def _ctc_por_ano():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "termos.db")
+    if not os.path.exists(p):
+        return pd.DataFrame()
+    con = sqlite3.connect(p)
+    try:
+        rows = con.execute(
+            "SELECT substr(data_decisao_iso,1,4) ano, situacao, COUNT(*) FROM "
+            "termos WHERE data_decisao_iso<>'' GROUP BY ano, situacao").fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["Ano", "Situação", "n"])
+    return df.pivot_table(index="Ano", columns="Situação", values="n",
+                          fill_value=0)
+
+
+def _render_ctc(a):
+    st.markdown("### 🤝 Comitê de Termo de Compromisso (CTC)")
+    st.caption("O CTC negocia e opina sobre as propostas de termo de "
+               "compromisso (TAC); o Colegiado decide aceitar ou rejeitar.")
+    total = a.get("_nr") or 0
+    c1, c2 = st.columns(2)
+    c1.metric("Termos de compromisso", total)
+    ta = str(a.get("taxa_aceitacao") or "")
+    c2.metric("Situação", "804 aceitos · 215 rejeitados"
+              if total >= 1000 else "—")
+    for rot, campo, kind in [("🎯 Papel", "papel", "ok"),
+                             ("📊 Taxa de aceitação", "taxa_aceitacao", "md"),
+                             ("📈 Evolução", "evolucao", "warn"),
+                             ("⚖️ Critérios do parecer", "criterios", "md"),
+                             ("🗂️ Tipos de caso", "tipos_de_caso", "info")]:
+        v = str(a.get(campo) or "").strip()
+        if not v or v == "-":
+            continue
+        (st.success if kind == "ok" else st.warning if kind == "warn"
+         else st.info if kind == "info" else st.markdown)(f"**{rot}:** {v}")
+    piv = _ctc_por_ano()
+    if len(piv):
+        st.markdown("**TCs por ano (aceitos × rejeitados):**")
+        st.bar_chart(piv)
+    sp = str(a.get("system_prompt") or "").strip()
+    if sp:
+        with st.expander("🤖 System prompt do agente do CTC (copiar)"):
+            st.code(sp, language=None)
+
+
+_TIPO_LABEL = {"sancionadora": "🛡️ Sancionadora", "registro": "📝 Registro",
+               "normativa": "📐 Normativa", "orientacao": "🧭 Orientação",
+               "apoio": "⚙️ Apoio/administrativa", "comite": "🤝 Comitê"}
+
+
+def render_agentes_unidade():
+    st.markdown("#### 🗂️ Unidades da CVM — superintendências, gerências e CTC")
+    ags = _agentes_unidade()
+    ger = _agentes_gerencia()
+    if not ags:
+        st.info("⏳ Os agentes de unidade ainda estão sendo construídos.")
+        return
+    st.caption("Perfil institucional de cada superintendência (competência, "
+               "titulares, gerências e **footprint recursal** — quantos recursos "
+               "o Colegiado julgou contra decisões da área), das gerências e do "
+               "Comitê de Termo de Compromisso.")
+    # CTC em destaque
+    if "CTC" in ags:
+        with st.container(border=True):
+            _render_ctc(ags["CTC"])
+    st.divider()
+    # superintendências
+    sis = [(s, a) for s, a in ags.items() if s != "CTC"]
+    sis.sort(key=lambda kv: (-(kv[1].get("_nr") or 0), kv[0]))
+    sig = st.selectbox(
+        "Ver superintendência", [s for s, _ in sis],
+        format_func=lambda s: f"{s} — {ags[s].get('_nome','')} "
+        f"· {_TIPO_LABEL.get(ags[s].get('_tipo'),'')}"
+        + (f" · {ags[s].get('_nr')} recursos" if ags[s].get('_nr') else ""),
+        key="ag_unidade", index=None, placeholder="escolha uma superintendência…")
+    if not sig:
+        # visão geral: árvore de gerências por SI
+        st.markdown("**Estrutura — gerências por superintendência:**")
+        for s, a in sis:
+            gl = ger.get(s, [])
+            if not gl:
+                continue
+            with st.expander(f"{s} — {a.get('_nome','')} ({len(gl)} gerências)"):
+                for g in gl:
+                    ch = f" — chefe: {g['chefe']}" if g.get("chefe") else ""
+                    st.markdown(f"- **{g['sigla']}** {g['nome']}{ch}")
+        outras = ger.get("?", [])
+        if outras:
+            with st.expander(f"Outras gerências ({len(outras)})"):
+                for g in outras:
+                    ch = f" — chefe: {g['chefe']}" if g.get("chefe") else ""
+                    st.markdown(f"- **{g['sigla']}** {g['nome']}{ch}")
+        return
+    a = ags[sig]
+    if a.get("_nr"):
+        st.metric("Recursos julgados pelo Colegiado (decisões da área)",
+                  a.get("_nr"))
+    comp = str(a.get("competencia_pratica") or a.get("competencia") or "").strip()
+    if comp:
+        st.success(f"**Competência:** {comp}")
+    if not a.get("_ia"):
+        st.caption("Unidade de apoio/administrativa — card institucional "
+                   "(sem análise de jurisprudência).")
+    for rot, campo, kind in [
+            ("⚖️ Papel no enforcement", "papel_enforcement", "md"),
+            ("📊 Footprint recursal", "footprint_recursal", "info"),
+            ("⚔️ Onde o mercado mais recorre", "atritos_recursais", "warn"),
+            ("🗂️ Temas recorrentes", "temas_ou_casos", "md"),
+            ("📜 Histórico de titulares", "titulares_historia", "md")]:
+        v = str(a.get(campo) or "").strip()
+        if not v or v == "-":
+            continue
+        (st.info if kind == "info" else st.warning if kind == "warn"
+         else st.markdown)(f"**{rot}:** {v}")
+    # gerências da SI (dado estruturado)
+    gl = ger.get(sig, [])
+    if gl:
+        with st.expander(f"🏢 Gerências subordinadas ({len(gl)})"):
+            for g in gl:
+                ch = f" — chefe atual: {g['chefe']}" if g.get("chefe") else ""
+                st.markdown(f"- **{g['sigla']}** {g['nome']}{ch}")
+    elif not a.get("_ia"):
+        tit = a.get("titulares") or []
+        if tit:
+            st.markdown("**Titulares (Boletim de Pessoal):**")
+            for t in tit[:6]:
+                if isinstance(t, dict):
+                    st.markdown(f"- {t.get('nome','')} ({t.get('data','')})")
+    if a.get("_tipo") == "sancionadora":
+        st.caption("🛡️ Esta SI também tem um **agente de acusação × acolhimento** "
+                   "(aba “Agentes de área”), com a estatística dos julgados.")
+    sp = str(a.get("system_prompt") or "").strip()
+    if sp:
+        with st.expander("🤖 System prompt do agente da unidade (copiar)"):
+            st.code(sp, language=None)
+
+
 def _analise_html(a, e):
     """Bloco HTML da análise IA para o popup do processo."""
     if not a:
@@ -5627,7 +5816,8 @@ def render_colegiado():
     st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
     visao = st.segmented_control(
         "Seção", ["📜 Decisões, Atas e Votos", "🎯 Ficha do diretor",
-                  "🧠 Agentes de tese", "🏢 Agentes de área", "📰 Informativos",
+                  "🧠 Agentes de tese", "🏢 Agentes de área",
+                  "🗂️ Unidades e CTC", "📰 Informativos",
                   "👥 Quem é Quem", "📋 Atas do CGE"],
         key="col_nav", default="📜 Decisões, Atas e Votos",
         label_visibility="collapsed")
@@ -5640,6 +5830,8 @@ def render_colegiado():
         render_agentes_tese()
     elif visao == "🏢 Agentes de área":
         render_agentes_area()
+    elif visao == "🗂️ Unidades e CTC":
+        render_agentes_unidade()
     elif visao == "📰 Informativos":
         render_informativos()
     elif visao == "👥 Quem é Quem":
