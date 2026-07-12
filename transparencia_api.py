@@ -101,11 +101,12 @@ def orgao(descricao="valores mobiliarios"):
 
 # --------------------------------------------------------------- storage
 def _con():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=60)
+    c.execute("PRAGMA busy_timeout=60000")
     c.execute("""CREATE TABLE IF NOT EXISTS viagens_gov(
-        pcdp TEXT PRIMARY KEY, beneficiario TEXT, benef_key TEXT, cpf TEXT,
-        cargo TEXT, funcao TEXT, orgao TEXT, ug TEXT,
-        data_inicio TEXT, data_fim TEXT, destino TEXT, motivo TEXT,
+        id TEXT PRIMARY KEY, pcdp TEXT, beneficiario TEXT, benef_key TEXT,
+        cpf TEXT, cargo TEXT, funcao TEXT, tipo TEXT, orgao TEXT, ug TEXT,
+        data_inicio TEXT, data_fim TEXT, motivo TEXT,
         valor_diarias REAL, valor_passagem REAL, valor_total REAL,
         valor_devolucao REAL, ano INTEGER, coletado_em TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS servidores_gov(
@@ -142,57 +143,73 @@ def _campo(d, *ks):
     return ""
 
 
+def _grava_viagem(c, v):
+    """Insere/atualiza uma ViagemDTO; retorna 1 se nova (id inedito)."""
+    vid = str(_campo(v, "id") or _campo(v, "viagem.pcdp"))
+    nome = _campo(v, "beneficiario.nome", "nomeBeneficiario", "nome")
+    novo = c.execute("SELECT 1 FROM viagens_gov WHERE id=?", (vid,)).fetchone()
+    c.execute(
+        "INSERT OR REPLACE INTO viagens_gov(id,pcdp,beneficiario,benef_key,cpf,"
+        "cargo,funcao,tipo,orgao,ug,data_inicio,data_fim,motivo,valor_diarias,"
+        "valor_passagem,valor_total,valor_devolucao,ano,coletado_em) VALUES("
+        "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        (vid, _campo(v, "viagem.pcdp", "pcdp"), nome, _na(nome),
+         _campo(v, "beneficiario.cpfFormatado"),
+         _campo(v, "cargo.descricao"), _campo(v, "funcao.descricao"),
+         _campo(v, "tipoViagem"), _campo(v, "orgao.nome"),
+         _campo(v, "unidadeGestoraResponsavel.nome", "unidadeGestoraResponsavel"),
+         _campo(v, "dataInicioAfastamento"), _campo(v, "dataFimAfastamento"),
+         _campo(v, "viagem.motivo", "motivo"),
+         _num(_campo(v, "valorTotalDiarias")),
+         _num(_campo(v, "valorTotalPassagem")),
+         _num(_campo(v, "valorTotalViagem")),
+         _num(_campo(v, "valorTotalDevolucao")),
+         _campo(v, "viagem.ano") or 0))
+    return 0 if novo else 1
+
+
+def _janela(ano, mes, addmes=0):
+    m = mes + addmes
+    a = ano + (m - 1) // 12
+    m = (m - 1) % 12 + 1
+    ult = calendar.monthrange(a, m)[1]
+    return f"01/{m:02d}/{a}", f"{ult:02d}/{m:02d}/{a}"
+
+
 def viagens(cod, ano_ini, ano_fim):
-    """Baixa as viagens da CVM (codigoOrgao SIAFI) mes a mes, ano_ini..ano_fim."""
+    """Baixa as viagens da CVM (codigoOrgao SIAFI) mes a mes. Como a API exige
+    janelas <=1 mes tanto de IDA quanto de RETORNO, para cada mes de ida M
+    consultamos o retorno em M e em M+1 (captura viagens que viram o mes),
+    deduplicando por id."""
     c = _con()
     total = 0
     for ano in range(int(ano_ini), int(ano_fim) + 1):
         for mes in range(1, 13):
-            ult = calendar.monthrange(ano, mes)[1]
-            di = f"01/{mes:02d}/{ano}"
-            dfim = f"{ult:02d}/{mes:02d}/{ano}"
-            pagina = 1
-            while True:
-                params = {"codigoOrgao": cod, "dataIdaDe": di,
-                          "dataIdaAte": dfim, "pagina": pagina}
-                try:
-                    dados = _get("/viagens", params)
-                except RuntimeError as e:
-                    print(f"  ! {ano}-{mes:02d} p{pagina}: {e}", file=sys.stderr)
-                    break
-                if not dados:
-                    break
-                for v in dados:
-                    pcdp = str(_campo(v, "pcdp", "identificadorPcdp", "id") or
-                               f"{ano}{mes:02d}-{total}")
-                    nome = _campo(v, "nomeBeneficiario", "beneficiario.nome",
-                                  "servidor.nome", "nome")
-                    c.execute(
-                        "INSERT OR REPLACE INTO viagens_gov(pcdp,beneficiario,"
-                        "benef_key,cpf,cargo,funcao,orgao,ug,data_inicio,"
-                        "data_fim,destino,motivo,valor_diarias,valor_passagem,"
-                        "valor_total,valor_devolucao,ano,coletado_em) VALUES("
-                        "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
-                        (pcdp, nome, _na(nome),
-                         _campo(v, "cpfFormatado", "beneficiario.cpfFormatado"),
-                         _campo(v, "cargo.descricao", "cargo", "descricaoCargo"),
-                         _campo(v, "funcao.descricao", "funcao"),
-                         _campo(v, "orgao.nome", "orgao", "nomeOrgao"),
-                         _campo(v, "unidadeGestoraResponsavel.nome", "ug"),
-                         _campo(v, "dataInicioAfastamento", "dataIda"),
-                         _campo(v, "dataFimAfastamento", "dataRetorno"),
-                         _campo(v, "destinos", "destino"),
-                         _campo(v, "motivo", "justificativa"),
-                         _num(_campo(v, "valorTotalDiarias", "valorDiarias")),
-                         _num(_campo(v, "valorTotalPassagem", "valorPassagens")),
-                         _num(_campo(v, "valorTotalViagem", "valorTotal")),
-                         _num(_campo(v, "valorTotalDevolucao", "valorDevolucao")),
-                         ano))
-                    total += 1
+            ide, ida = _janela(ano, mes)
+            mnovos = 0
+            for add in (0, 1):
+                rde, rate = _janela(ano, mes, add)
+                pagina = 1
+                while True:
+                    params = {"codigoOrgao": cod, "dataIdaDe": ide,
+                              "dataIdaAte": ida, "dataRetornoDe": rde,
+                              "dataRetornoAte": rate, "pagina": pagina}
+                    try:
+                        dados = _get("/viagens", params)
+                    except RuntimeError as e:
+                        print(f"  ! {ano}-{mes:02d}(r+{add}) p{pagina}: {e}",
+                              file=sys.stderr)
+                        break
+                    if not dados:
+                        break
+                    for v in dados:
+                        mnovos += _grava_viagem(c, v)
+                    pagina += 1
+                    time.sleep(PAUSA)
                 c.commit()
-                print(f"  {ano}-{mes:02d} p{pagina}: +{len(dados)} (acum {total})")
-                pagina += 1
-                time.sleep(PAUSA)
+            total += mnovos
+            if mnovos:
+                print(f"  {ano}-{mes:02d}: +{mnovos} (acum {total})")
     c.close()
     print(f"[viagens] {total} viagens da CVM gravadas em transparencia.db")
 
@@ -255,23 +272,27 @@ def cruzar():
             pass
         p.close()
     agg = {}
-    for nome, di, va, vp, vt in c.execute(
-            "SELECT beneficiario, valor_diarias, valor_diarias, valor_passagem,"
+    for nome, tipo, vd, vp, vt in c.execute(
+            "SELECT beneficiario, tipo, valor_diarias, valor_passagem,"
             " valor_total FROM viagens_gov"):
         k = _pk(nome)
         if dirs and k not in dirs:
             continue
-        a = agg.setdefault(k or nome, {"nome": nome, "n": 0, "d": 0.0,
-                                       "p": 0.0, "t": 0.0})
+        a = agg.setdefault(k or nome, {"nome": nome, "n": 0, "intl": 0,
+                                       "d": 0.0, "p": 0.0, "t": 0.0})
         a["n"] += 1
-        a["d"] += _num(va)
+        a["intl"] += 1 if str(tipo).lower().startswith("intern") else 0
+        a["d"] += _num(vd)
         a["p"] += _num(vp)
         a["t"] += _num(vt)
-    print(f"{'Diretor':32} {'viagens':>7} {'diarias':>12} {'passagens':>12} "
-          f"{'total':>12}")
+    print(f"{'Diretor':30} {'viag':>5} {'intl':>5} {'diarias':>12} "
+          f"{'passagens':>12} {'total':>13}")
+    tg = 0.0
     for k, a in sorted(agg.items(), key=lambda kv: -kv[1]["t"]):
-        print(f"{a['nome'][:32]:32} {a['n']:>7} {a['d']:>12,.2f} "
-              f"{a['p']:>12,.2f} {a['t']:>12,.2f}")
+        tg += a["t"]
+        print(f"{a['nome'][:30]:30} {a['n']:>5} {a['intl']:>5} {a['d']:>12,.2f} "
+              f"{a['p']:>12,.2f} {a['t']:>13,.2f}")
+    print(f"{'TOTAL':30} {'':>5} {'':>5} {'':>12} {'':>12} {tg:>13,.2f}")
     c.close()
 
 
