@@ -3539,44 +3539,54 @@ def render_servidores():
             column_config={
                 "Dias úteis (mandato)": st.column_config.NumberColumn(format="%d"),
                 "Dias viajando": st.column_config.NumberColumn(format="%d"),
-                "Custo diárias (R$)": st.column_config.NumberColumn(
-                    format="R$ %.2f")})
+                "Custo real (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                "Diárias Boletim (R$)": st.column_config.NumberColumn(
+                    format="R$ %.0f")})
         _abrir_ficha_sel(ev, show_col, "_srv_open_col", "Diretor(a)")
-        st.caption("**Dias úteis (mandato)** = dias de trabalho (seg–sex; feriados "
-                   "não deduzidos); **Dias viajando** = dias corridos de afastamento "
-                   "do país; **% = dias viajando ÷ dias úteis do mandato**. Inclui "
-                   "atuais e ex-diretores. Otto e Accioly têm o mandato separado em "
-                   "**Diretor** e **Presidência (interina)** — dos atos formais do "
-                   "Boletim somados ao período contínuo desde a renúncia de João "
-                   "Pedro (08/2025). **Custo = diárias nacionais** do Boletim; o "
-                   "**custo real (com passagens e internacionais)** está na tabela "
-                   "abaixo. Clique para a ficha. ⚠️ estimado dos boletins.")
+        st.caption("**Dias úteis (mandato)** = dias de trabalho (seg–sex); "
+                   "**Dias viajando** = dias corridos de afastamento do país; "
+                   "**%** = dias viajando ÷ dias úteis. **Custo real (R$)** = "
+                   "diárias + passagens do Portal da Transparência (2014+, inclui "
+                   "**internacionais**), atribuído à fase pela data da viagem; "
+                   "**Diárias Boletim** = diárias nacionais do Boletim (cobre todo "
+                   "o período, inclusive pré-2014). Inclui atuais e ex-diretores; "
+                   "Otto e Accioly com o mandato separado por papel. Clique p/ ficha.")
         st.divider()
-        # custo REAL (Portal da Transparência): diárias + passagens + internacionais
-        cr = _transparencia_custo_diretores()
-        if len(cr):
-            st.markdown("**💰 Custo real das viagens — Portal da Transparência** "
-                        "*(diárias + passagens, incluindo internacionais)*")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Custo real total (R$)",
-                      f"{cr['Total (R$)'].sum():,.0f}".replace(",", "."))
-            m2.metric("Viagens", int(cr["Viagens"].sum()))
-            m3.metric("Internacionais", int(cr["Internac."].sum()))
-            st.dataframe(
-                cr, use_container_width=True, hide_index=True,
-                column_config={c: st.column_config.NumberColumn(format="R$ %.0f")
-                               for c in ["Diárias (R$)", "Passagens (R$)",
-                                         "Total (R$)"]})
-            st.caption("Fonte: Portal da Transparência (viagens a serviço da CVM, "
-                       "2014–2026), cruzado por nome (1º+último) com os diretores "
-                       "do Boletim. Aqui o custo inclui **passagens** e as viagens "
-                       "**internacionais** — que o Boletim não valoriza.")
-            st.divider()
+    # superintendentes (últimos 5 anos) — custo de viagens
+    sup = _transparencia_superintendentes()
+    if len(sup):
+        st.markdown("**🧑‍💼 Superintendentes (últimos 5 anos) — custo de viagens**")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Custo total (R$)",
+                  f"{sup['Total (R$)'].sum():,.0f}".replace(",", "."))
+        s2.metric("Superintendentes", len(sup))
+        s3.metric("Internacionais", int(sup["Internac."].sum()))
+        st.dataframe(
+            sup, use_container_width=True, hide_index=True,
+            column_config={c: st.column_config.NumberColumn(format="R$ %.0f")
+                           for c in ["Diárias (R$)", "Passagens (R$)",
+                                     "Total (R$)"]})
+        st.caption("Servidores que ocuparam cargo de superintendente com ato nos "
+                   "últimos 5 anos (Boletim), cruzados com as viagens da CVM no "
+                   "Portal da Transparência (2014–2026).")
+        st.divider()
+    # evolução do custo de viagens: anual e mensal, por grupo
+    anual, mensal = _transparencia_custo_serie()
+    if len(anual):
+        st.markdown("**📈 Custo de viagens da CVM — evolução (anual e mensal)**")
+        st.caption("Portal da Transparência (viagens a serviço, 2014–2026), "
+                   "segmentado em Diretores / Superintendentes / Demais servidores.")
+        st.markdown("*Custo anual (R$):*")
+        st.bar_chart(anual)
+        st.markdown("*Custo mensal (R$):*")
+        st.line_chart(mensal)
+        st.divider()
     df = df.copy()
     df["_ano"] = df["boletim_data_iso"].astype(str).str[:4]
     st.caption(f"{len(df):,} viagens de {df['servidor_key'].nunique()} servidores "
                "(fonte: Boletim de Pessoal — Afastamentos do País e Concessões de "
-               "Diárias). Cruzamento com o Portal da Transparência: próxima fase."
+               "Diárias). O **custo real** (com passagens e internacionais, do "
+               "Portal da Transparência) está nas tabelas acima."
                .replace(",", "."))
     with st.expander("🔎 Filtros", expanded=True):
         c1, c2, c3 = st.columns([2, 1, 1])
@@ -5415,54 +5425,122 @@ def _ativo_recente(con, nome, skeys, meses=15):
 
 
 @st.cache_data(ttl=300)
+def _transp_db():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "transparencia.db")
+
+
 @st.cache_data(ttl=600)
-def _transparencia_custo_diretores():
-    """Custo REAL de viagens por diretor (Portal da Transparência): diárias +
-    passagens, com nº de internacionais. Casa por nome (1º+último) com os
-    diretores/presidentes do Boletim. Vazio se transparencia.db ausente."""
-    tp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      "transparencia.db")
-    if not (os.path.exists(tp) and os.path.exists(PESSOAL_DB_PATH)):
-        return pd.DataFrame()
-    con = sqlite3.connect(PESSOAL_DB_PATH)
-    dirs = {}
+def _transp_trips():
+    """pk(nome) -> lista de viagens (data_iso, tipo, diárias, passagens, total)
+    do Portal da Transparência, para enxertar o custo real por fase/pessoa."""
+    out = {}
+    tp = _transp_db()
+    if not os.path.exists(tp):
+        return out
+    con = sqlite3.connect(tp)
     try:
-        for (nome,) in con.execute(
-                "SELECT DISTINCT servidor_nome FROM movimentos WHERE funcao "
-                "LIKE '%Diretor%' OR funcao LIKE '%Presidente%'"):
+        for nome, di, tipo, vd, vp, vt in con.execute(
+                "SELECT beneficiario, data_inicio, tipo, valor_diarias, "
+                "valor_passagem, valor_total FROM viagens_gov"):
             k = _pk_nome(nome)
-            if len(k) >= 2:
-                dirs.setdefault(k, nome)
+            if len(k) < 2:
+                continue
+            out.setdefault(k, []).append(
+                (str(di or "")[:10], str(tipo or ""), vd or 0.0, vp or 0.0,
+                 vt or 0.0))
     except Exception:
         pass
     con.close()
-    if not dirs:
-        return pd.DataFrame()
-    tc = sqlite3.connect(tp)
-    agg = {}
+    return out
+
+
+@st.cache_data(ttl=600)
+def _cvm_grupos():
+    """(dir_keys:set, sup_nomes:dict pk->nome) — diretores/presidentes e
+    superintendentes (com ato nos últimos 5 anos), por chave 1º+último nome."""
+    dirs, sups = set(), {}
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return dirs, sups
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    corte = (dt.date.today() - dt.timedelta(days=int(5 * 365.25))).isoformat()
     try:
-        rows = tc.execute("SELECT beneficiario, tipo, valor_diarias, "
-                          "valor_passagem, valor_total FROM viagens_gov")
-        for nome, tipo, vd, vp, vt in rows:
+        for nome, fun, bd, da in con.execute(
+                "SELECT servidor_nome, funcao, boletim_data_iso, data_ato_iso "
+                "FROM movimentos WHERE funcao LIKE '%Diretor%' OR funcao LIKE "
+                "'%Presidente%' OR funcao LIKE '%uperinten%'"):
             k = _pk_nome(nome)
-            if k not in dirs:
+            if len(k) < 2:
                 continue
-            a = agg.setdefault(k, {"Diretor(a)": dirs[k].title(), "Viagens": 0,
-                                   "Internac.": 0, "Diárias (R$)": 0.0,
-                                   "Passagens (R$)": 0.0, "Total (R$)": 0.0})
-            a["Viagens"] += 1
-            a["Internac."] += 1 if str(tipo).lower().startswith("intern") else 0
-            a["Diárias (R$)"] += vd or 0
-            a["Passagens (R$)"] += vp or 0
-            a["Total (R$)"] += vt or 0
+            fl = str(fun or "").lower()
+            if "diretor" in fl or "presidente" in fl:
+                dirs.add(k)
+            if "superinten" in fl and (bd or da or "") >= corte:
+                if k not in sups or len(nome) > len(sups[k]):
+                    sups[k] = nome
     except Exception:
-        tc.close()
+        pass
+    con.close()
+    return dirs, sups
+
+
+@st.cache_data(ttl=600)
+def _transparencia_superintendentes():
+    """Custo de viagens (Transparência) dos superintendentes dos últimos 5
+    anos, por pessoa. Vazio se as bases não existirem."""
+    _, sups = _cvm_grupos()
+    trips = _transp_trips()
+    if not (sups and trips):
         return pd.DataFrame()
-    tc.close()
-    if not agg:
+    recs = []
+    for k, nome in sups.items():
+        tr = trips.get(k, [])
+        if not tr:
+            continue
+        recs.append({
+            "Superintendente": nome.title(), "Viagens": len(tr),
+            "Internac.": sum(1 for x in tr if x[1].lower().startswith("intern")),
+            "Diárias (R$)": round(sum(x[2] for x in tr), 2),
+            "Passagens (R$)": round(sum(x[3] for x in tr), 2),
+            "Total (R$)": round(sum(x[4] for x in tr), 2)})
+    if not recs:
         return pd.DataFrame()
-    return pd.DataFrame(list(agg.values())).sort_values(
-        "Total (R$)", ascending=False)
+    return pd.DataFrame(recs).sort_values("Total (R$)", ascending=False)
+
+
+@st.cache_data(ttl=600)
+def _transparencia_custo_serie():
+    """Série do custo de viagens (Transparência): por ano e por mês, segmentada
+    em Diretores / Superintendentes / Demais servidores."""
+    tp = _transp_db()
+    if not os.path.exists(tp):
+        return pd.DataFrame(), pd.DataFrame()
+    dirs, sups = _cvm_grupos()
+    con = sqlite3.connect(tp)
+    try:
+        rows = con.execute("SELECT beneficiario, data_inicio, valor_total "
+                           "FROM viagens_gov").fetchall()
+    except Exception:
+        rows = []
+    con.close()
+    reg = []
+    for nome, di, vt in rows:
+        di = str(di or "")[:10]
+        if len(di) < 7:
+            continue
+        k = _pk_nome(nome)
+        grp = ("Diretores" if k in dirs else
+               "Superintendentes" if k in sups else "Demais servidores")
+        reg.append({"ano": di[:4], "mes": di[:7], "grupo": grp,
+                    "valor": vt or 0.0})
+    if not reg:
+        return pd.DataFrame(), pd.DataFrame()
+    d = pd.DataFrame(reg)
+    anual = d.pivot_table(index="ano", columns="grupo", values="valor",
+                          aggfunc="sum", fill_value=0)
+    mensal = d.pivot_table(index="mes", columns="grupo", values="valor",
+                           aggfunc="sum", fill_value=0)
+    return anual, mensal
 
 
 def _diretores_mandatos():
@@ -5486,6 +5564,7 @@ def _diretores_mandatos():
     interinos = _interino_periodos()
     mate = _mandato_ate()
     plenos = _presidencia_plena()
+    ttrips_all = _transp_trips()   # custo real (Transparência) por pessoa
     pessoas = {}
     for t, nome, data, fun in stat:
         p = pessoas.setdefault(_pk_nome(nome),
@@ -5528,6 +5607,7 @@ def _diretores_mandatos():
             vg = con.execute(
                 f"SELECT tipo, periodo_ini, boletim_data_iso, valor_diarias FROM "
                 f"viagens WHERE servidor_key IN ({ph})", skeys).fetchall()
+        ptr = ttrips_all.get(k, [])   # viagens da Transparencia desta pessoa
         mine = []
         for a, b in interinos.get(k, []):
             a2, b2 = max(a, inicio), min(b, fim)
@@ -5555,13 +5635,18 @@ def _diretores_mandatos():
                      if x[0] == "afastamento_pais")
             nv = sum(1 for x in sub if x[0] == "afastamento_pais")
             custo = sum(_parse_valor(x[3]) for x in sub)
+            # custo REAL da Transparencia, atribuido a esta fase pela data
+            tsub = [x for x in ptr if dentro(x[0])]
+            treal = sum(x[4] for x in tsub)
+            tintl = sum(1 for x in tsub if x[1].lower().startswith("intern"))
             return {"Diretor(a)": p["nome"].title(), "Papel": papel,
                     "Início": min(a for a, _ in intervals),
                     "Dias úteis (mandato)": bdias, "Viagens": nv,
                     "Dias viajando": dv,
                     "% do mandato viajando":
                     round(100 * dv / bdias, 1) if bdias else 0.0,
-                    "Custo diárias (R$)": round(custo, 2), "Status": status}
+                    "Custo real (R$)": round(treal, 2), "Intl": tintl,
+                    "Diárias Boletim (R$)": round(custo, 2), "Status": status}
 
         if p["pres"]:
             # presidente estatutário: mandato inteiro como Presidente
