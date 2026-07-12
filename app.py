@@ -3842,6 +3842,102 @@ def render_agentes_tese():
                 st.code(sp, language=None)
 
 
+@st.cache_data(ttl=600)
+def _agentes_area():
+    """sigla -> dossie do agente da área técnica (Fase D da jurisprudência)."""
+    ags = {}
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return ags
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS agentes_area(sigla TEXT PRIMARY "
+                    "KEY, nome TEXT, dossie TEXT, n_casos INTEGER, "
+                    "acolhimento REAL, ai_feito INTEGER, atualizado_em TEXT)")
+        for sig, nome, d, n, ac in con.execute(
+                "SELECT sigla, nome, dossie, n_casos, acolhimento FROM "
+                "agentes_area WHERE ai_feito=1"):
+            try:
+                ags[sig] = {**json.loads(d), "_nome": nome, "_n": n, "_ac": ac}
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+    con.close()
+    return ags
+
+
+def render_agentes_area():
+    st.markdown("#### 🏢 Agentes das áreas técnicas (acusação × acolhimento)")
+    ags = _agentes_area()
+    if not ags:
+        st.info("⏳ Os agentes de área ainda estão sendo construídos.")
+        return
+    st.caption("Cada superintendência é a **acusadora** perante o Colegiado. "
+               "Aqui está o perfil de cada uma e **quanto de sua acusação o "
+               "Colegiado acolhe** — base: toda a jurisprudência 1999–2025.")
+    # ranking comparativo por acolhimento
+    rk = sorted(ags.items(), key=lambda kv: (kv[1].get("_ac") or 0),
+                reverse=True)
+    df = pd.DataFrame([{"Área": s, "Superintendência": a.get("_nome", ""),
+                        "Casos": a.get("_n") or 0,
+                        "Acolhimento (%)": a.get("_ac")} for s, a in rk])
+    st.dataframe(df, use_container_width=True, hide_index=True,
+                 column_config={"Acolhimento (%)": st.column_config.ProgressColumn(
+                     "Acolhimento (%)", min_value=0, max_value=100,
+                     format="%.1f%%")})
+    st.caption("Acolhimento = % dos casos de mérito (fora TAC) em que o "
+               "Colegiado condenou (total ou parcialmente) o que a área acusou. "
+               "Média geral ≈ 84%.")
+    sig = st.selectbox("Ver agente da área", [s for s, _ in rk],
+                       format_func=lambda s: f"{s} — {ags[s].get('_nome','')} "
+                       f"({ags[s].get('_n',0)} casos · {ags[s].get('_ac','?')}%)",
+                       key="ag_area", index=None, placeholder="escolha uma área…")
+    if not sig:
+        return
+    a = ags[sig]
+    c1, c2 = st.columns(2)
+    c1.metric("Casos julgados", a.get("_n") or 0)
+    c2.metric("Acolhimento pelo Colegiado", f"{a.get('_ac','?')}%")
+    perfil = str(a.get("perfil") or "").strip()
+    if perfil:
+        st.success(f"**Perfil:** {perfil}")
+    for rot, campo, kind in [
+            ("🎯 Foco acusatório", "foco_acusatorio", "md"),
+            ("⚖️ Teses defendidas", "teses_defendidas", "md"),
+            ("📊 Taxa de acolhimento", "taxa_acolhimento", "md"),
+            ("📈 Evolução do rigor", "evolucao_rigor", "warn"),
+            ("⚔️ Atritos com o Colegiado", "atritos_colegiado", "info")]:
+        v = str(a.get(campo) or "").strip()
+        if not v or v == "-":
+            continue
+        if kind == "warn":
+            st.warning(f"**{rot}:** {v}")
+        elif kind == "info":
+            st.info(f"**{rot}:** {v}")
+        else:
+            st.markdown(f"**{rot}:** {v}")
+    ck = a.get("casos_chave")
+    if ck:
+        st.markdown("**Casos-chave:**")
+        if isinstance(ck, list):
+            for c in ck:
+                st.markdown(f"- {c}")
+        else:
+            st.markdown(str(ck))
+    sup = a.get("superintendentes")
+    if sup:
+        with st.expander("👤 Superintendentes (Boletim de Pessoal)"):
+            if isinstance(sup, list):
+                for s in sup:
+                    st.markdown(f"- {s}")
+            else:
+                st.markdown(str(sup))
+    sp = str(a.get("system_prompt") or "").strip()
+    if sp:
+        with st.expander("🤖 System prompt do agente de área (copiar)"):
+            st.code(sp, language=None)
+
+
 def _analise_html(a, e):
     """Bloco HTML da análise IA para o popup do processo."""
     if not a:
@@ -5531,8 +5627,8 @@ def render_colegiado():
     st.subheader("🏛️ Colegiado — decisões, votos e pessoas")
     visao = st.segmented_control(
         "Seção", ["📜 Decisões, Atas e Votos", "🎯 Ficha do diretor",
-                  "🧠 Agentes de tese", "📰 Informativos", "👥 Quem é Quem",
-                  "📋 Atas do CGE"],
+                  "🧠 Agentes de tese", "🏢 Agentes de área", "📰 Informativos",
+                  "👥 Quem é Quem", "📋 Atas do CGE"],
         key="col_nav", default="📜 Decisões, Atas e Votos",
         label_visibility="collapsed")
     st.divider()
@@ -5542,6 +5638,8 @@ def render_colegiado():
         render_ficha_diretor()
     elif visao == "🧠 Agentes de tese":
         render_agentes_tese()
+    elif visao == "🏢 Agentes de área":
+        render_agentes_area()
     elif visao == "📰 Informativos":
         render_informativos()
     elif visao == "👥 Quem é Quem":
