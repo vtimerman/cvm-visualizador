@@ -136,8 +136,14 @@ def _pais_moderno(sec):
     Case-insensitive e multi-viajante."""
     out = []
     flat = re.sub(r"\s+", " ", sec).strip()
-    for p in re.split(r"(?i)(?=\bafastamento do pa[ií]s\b)", flat):
-        if not re.search(r"(?i)afastamento do pa[ií]s", p):
+    partes = re.split(r"(?i)(?=\bafastamento do pa[ií]s\b)", flat)
+    for i, p in enumerate(partes):
+        if not re.match(r"(?i)afastamento do pa[ií]s", p):
+            continue
+        # o que autoriza esta no fim do trecho anterior: pula CANCELAMENTOS
+        # ('torna insubsistente a autorizacao do afastamento...').
+        antes = partes[i - 1][-110:].lower() if i > 0 else ""
+        if "insubsistente" in antes:
             continue
         cabeca = re.split(r"(?i)\bno per[ií]odo\b|\ba fim de\b|\bpara participar",
                           p, maxsplit=1)[0]
@@ -235,6 +241,7 @@ def extrair_viagens(con):
     rows = con.execute("SELECT numero, data_iso, pdf_url, texto FROM boletins "
                        "WHERE texto IS NOT NULL AND texto<>''").fetchall()
     total = 0
+    seen_afast = set()   # dedup global de afastamentos por (servidor, periodo)
     for numero, data_iso, url, texto in rows:
         itens = []
         s1 = _secao(texto, r"AFASTAMENTO DO PA[IÍ]S")
@@ -244,6 +251,14 @@ def extrair_viagens(con):
         if s2:
             itens += _viagens_diarias(s2)
         for it in itens:
+            if it["tipo"] == "afastamento_pais":
+                per = (it["periodo_ini"] or "").strip()
+                if not per:
+                    continue                       # cancelamento / sem periodo
+                chave = (_key(it["servidor_nome"]), per)
+                if chave in seen_afast:
+                    continue                       # republicacao / alteracao
+                seen_afast.add(chave)
             con.execute(
                 "INSERT INTO viagens(tipo,servidor_nome,servidor_key,cargo,origem,"
                 "destino,periodo_ini,periodo_fim,motivo,descricao,valor_diarias,"

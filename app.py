@@ -4980,6 +4980,60 @@ def _interino_periodos():
 
 
 @st.cache_data(ttl=300)
+def _mandato_ate():
+    """{pessoa: data-fim de mandato mais recente} do texto das nomeações
+    ('nomeado/reconduzido para exercer o cargo de Diretor/Presidente ... com
+    mandato até DD de mês de AAAA'). É o fim autoritativo do mandato."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return {}
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    PAT = re.compile(
+        r"([A-ZÀ-Ú][A-ZÀ-Ú'’]+(?:\s+[A-ZÀ-Ú'’]+){1,6}),\s*(?:cedid[oa][^,]*,\s*)?"
+        r"(?:nomead[oa]|reconduzid[oa])\b.{0,240}?mandato\s+at[eé]\s+(\d{1,2})\s+de"
+        r"\s+([a-zç]+)\s+de\s+(\d{4})", re.I)
+    out = {}
+    for (texto,) in con.execute("SELECT texto FROM boletins WHERE texto LIKE "
+                                "'%mandato at%' AND data_iso<>''"):
+        flat = re.sub(r"\s+", " ", texto)
+        for m in PAT.finditer(flat):
+            nome = re.sub(r".*NOMEA[CÇ][AÃ]O\s*", "", m.group(1), flags=re.I).strip()
+            mo = _MESES_PT.get(m.group(3).lower())
+            if not mo:
+                continue
+            fim = f"{int(m.group(4)):04d}-{mo:02d}-{int(m.group(2)):02d}"
+            k = _pk_nome(nome)
+            if k not in out or fim > out[k]:
+                out[k] = fim
+    con.close()
+    return out
+
+
+def _ativo_recente(con, nome, skeys, meses=15):
+    """A pessoa mostra atividade nos últimos ~15 meses? (viagem, ou assinatura/
+    citação como Presidente/Diretor num boletim recente.) Distingue quem foi
+    reconduzido e continua de quem apenas atuou logo após um mandato parcial."""
+    corte = (dt.date.today() - dt.timedelta(days=int(meses * 30.4))).isoformat()
+    if skeys:
+        ph = ",".join("?" * len(skeys))
+        if con.execute(f"SELECT 1 FROM viagens WHERE servidor_key IN ({ph}) AND "
+                       "boletim_data_iso>? LIMIT 1", (*skeys, corte)).fetchone():
+            return True
+    toks = _ent_key(nome).split()
+    if len(toks) < 2:
+        return False
+    first, last = toks[0], toks[-1]
+    for (texto,) in con.execute("SELECT texto FROM boletins WHERE data_iso>? AND "
+                                "texto<>''", (corte,)):
+        flat = re.sub(r"\s+", " ", texto)
+        for m in re.finditer(r"[A-ZÀ-Ú][A-ZÀ-Ú ]{6,55}?\s+(?:Presidente(?: Interino)?"
+                             r"|Diretora?)\b", flat):
+            k = _ent_key(m.group(0))
+            if first in k and last in k:
+                return True
+    return False
+
+
+@st.cache_data(ttl=300)
 def _diretores_mandatos():
     """TODOS os diretores/presidentes (atuais + ex), com o mandato segmentado
     por papel (Diretor × Presidência interina) a partir dos atos do Boletim.
@@ -4999,6 +5053,7 @@ def _diretores_mandatos():
         return pd.DataFrame()
     hoje = dt.date.today()
     interinos = _interino_periodos()
+    mate = _mandato_ate()
     pessoas = {}
     for t, nome, data, fun in stat:
         p = pessoas.setdefault(_pk_nome(nome),
@@ -5013,18 +5068,28 @@ def _diretores_mandatos():
         if not p["noms"]:
             continue
         inicio, last_nom = min(p["noms"]), max(p["noms"])
+        toks = [t for t in _ent_key(p["nome"]).split() if len(t) > 2]
+        skeys = sorted({_ent_key(n) for n in nomes_vg
+                        if all(t in _ent_key(n) for t in toks)})
         exo = [e for e in p["exos"] if e >= last_nom]
+        hoje_iso = hoje.isoformat()
+        fim_decl = mate.get(k)
         if exo:
+            # exoneração/término explícito é autoritativo: saiu.
             fim, status = min(exo), "Ex-diretor(a)"
+        elif fim_decl:
+            if fim_decl >= hoje_iso:
+                fim, status = hoje_iso, "Em exercício"
+            elif _ativo_recente(con, p["nome"], skeys):
+                fim, status = hoje_iso, "Em exercício"   # reconduzido/continua
+            else:
+                fim, status = fim_decl, "Ex-diretor(a)"
         elif (hoje - dt.date.fromisoformat(inicio)).days > 5.6 * 365:
             fim = (dt.date.fromisoformat(inicio)
                    + dt.timedelta(days=int(5 * 365.25))).isoformat()
             status = "Ex-diretor(a) (fim estimado)"
         else:
-            fim, status = hoje.isoformat(), "Em exercício"
-        toks = [t for t in _ent_key(p["nome"]).split() if len(t) > 2]
-        skeys = sorted({_ent_key(n) for n in nomes_vg
-                        if all(t in _ent_key(n) for t in toks)})
+            fim, status = hoje_iso, "Em exercício"
         vg = []
         if skeys:
             ph = ",".join("?" * len(skeys))
