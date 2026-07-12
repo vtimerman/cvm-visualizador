@@ -3548,10 +3548,30 @@ def render_servidores():
                    "atuais e ex-diretores. Otto e Accioly têm o mandato separado em "
                    "**Diretor** e **Presidência (interina)** — dos atos formais do "
                    "Boletim somados ao período contínuo desde a renúncia de João "
-                   "Pedro (08/2025). **Custo = diárias nacionais** (afastamentos "
-                   "internacionais não trazem valor no Boletim — virá do Portal da "
-                   "Transparência). Clique para a ficha. ⚠️ estimado dos boletins.")
+                   "Pedro (08/2025). **Custo = diárias nacionais** do Boletim; o "
+                   "**custo real (com passagens e internacionais)** está na tabela "
+                   "abaixo. Clique para a ficha. ⚠️ estimado dos boletins.")
         st.divider()
+        # custo REAL (Portal da Transparência): diárias + passagens + internacionais
+        cr = _transparencia_custo_diretores()
+        if len(cr):
+            st.markdown("**💰 Custo real das viagens — Portal da Transparência** "
+                        "*(diárias + passagens, incluindo internacionais)*")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Custo real total (R$)",
+                      f"{cr['Total (R$)'].sum():,.0f}".replace(",", "."))
+            m2.metric("Viagens", int(cr["Viagens"].sum()))
+            m3.metric("Internacionais", int(cr["Internac."].sum()))
+            st.dataframe(
+                cr, use_container_width=True, hide_index=True,
+                column_config={c: st.column_config.NumberColumn(format="R$ %.0f")
+                               for c in ["Diárias (R$)", "Passagens (R$)",
+                                         "Total (R$)"]})
+            st.caption("Fonte: Portal da Transparência (viagens a serviço da CVM, "
+                       "2014–2026), cruzado por nome (1º+último) com os diretores "
+                       "do Boletim. Aqui o custo inclui **passagens** e as viagens "
+                       "**internacionais** — que o Boletim não valoriza.")
+            st.divider()
     df = df.copy()
     df["_ano"] = df["boletim_data_iso"].astype(str).str[:4]
     st.caption(f"{len(df):,} viagens de {df['servidor_key'].nunique()} servidores "
@@ -5395,6 +5415,56 @@ def _ativo_recente(con, nome, skeys, meses=15):
 
 
 @st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
+def _transparencia_custo_diretores():
+    """Custo REAL de viagens por diretor (Portal da Transparência): diárias +
+    passagens, com nº de internacionais. Casa por nome (1º+último) com os
+    diretores/presidentes do Boletim. Vazio se transparencia.db ausente."""
+    tp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "transparencia.db")
+    if not (os.path.exists(tp) and os.path.exists(PESSOAL_DB_PATH)):
+        return pd.DataFrame()
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    dirs = {}
+    try:
+        for (nome,) in con.execute(
+                "SELECT DISTINCT servidor_nome FROM movimentos WHERE funcao "
+                "LIKE '%Diretor%' OR funcao LIKE '%Presidente%'"):
+            k = _pk_nome(nome)
+            if len(k) >= 2:
+                dirs.setdefault(k, nome)
+    except Exception:
+        pass
+    con.close()
+    if not dirs:
+        return pd.DataFrame()
+    tc = sqlite3.connect(tp)
+    agg = {}
+    try:
+        rows = tc.execute("SELECT beneficiario, tipo, valor_diarias, "
+                          "valor_passagem, valor_total FROM viagens_gov")
+        for nome, tipo, vd, vp, vt in rows:
+            k = _pk_nome(nome)
+            if k not in dirs:
+                continue
+            a = agg.setdefault(k, {"Diretor(a)": dirs[k].title(), "Viagens": 0,
+                                   "Internac.": 0, "Diárias (R$)": 0.0,
+                                   "Passagens (R$)": 0.0, "Total (R$)": 0.0})
+            a["Viagens"] += 1
+            a["Internac."] += 1 if str(tipo).lower().startswith("intern") else 0
+            a["Diárias (R$)"] += vd or 0
+            a["Passagens (R$)"] += vp or 0
+            a["Total (R$)"] += vt or 0
+    except Exception:
+        tc.close()
+        return pd.DataFrame()
+    tc.close()
+    if not agg:
+        return pd.DataFrame()
+    return pd.DataFrame(list(agg.values())).sort_values(
+        "Total (R$)", ascending=False)
+
+
 def _diretores_mandatos():
     """TODOS os diretores/presidentes (atuais + ex), com o mandato segmentado
     por papel (Diretor × Presidência interina) a partir dos atos do Boletim.
