@@ -3791,6 +3791,22 @@ def render_agentes_tese():
         ev_txt = str(a.get("evolucao") or "").strip()
         if ev_txt and ev_txt != "-":
             st.warning(f"**📈 Como o entendimento mudou:** {ev_txt}")
+        marcos = a.get("marcos") or []
+        if isinstance(marcos, list) and marcos:
+            st.markdown("**🏛️ Marcos da evolução** — precedentes que firmaram/"
+                        "mudaram o entendimento (e quem):")
+            for mk in marcos:
+                if not isinstance(mk, dict):
+                    st.markdown(f"- {mk}")
+                    continue
+                ano = str(mk.get("ano") or "").strip()
+                proc = str(mk.get("processo") or "").strip()
+                rel = str(mk.get("relator") or "").strip()
+                mud = str(mk.get("mudanca") or "").strip()
+                cab = " · ".join(x for x in [
+                    ano, (f"rel. {rel}" if rel and rel != "-" else ""),
+                    (proc if proc and proc != "-" else "")] if x)
+                st.markdown(f"- **{cab}** — {mud}" if cab else f"- {mud}")
         # linha do tempo: VER a mudança ao longo dos anos
         tl = _tema_timeline(tema)
         if len(tl) >= 2:
@@ -3803,15 +3819,18 @@ def render_agentes_tese():
                 st.dataframe(tl[["Data", "Relator", "Severidade", "Multa (R$)",
                                  "Desfecho"]], use_container_width=True,
                              hide_index=True)
-            st.caption("⚠️ Cobertura atual: 2022–2026 (análises IA). A varredura da "
-                       "jurisprudência completa (1999–2025) trará a evolução "
-                       "histórica das teses e **quem** as mudou.")
+            st.caption("O gráfico de severidade acima usa as análises de conduta "
+                       "(2022–2026); a **tese vigente, a evolução e os marcos** "
+                       "acima já refletem **toda a jurisprudência 1999–2025**.")
         for rot, campo in [("Dosimetria", "dosimetria"),
                            ("Posição por diretor", "posicao_por_diretor"),
                            ("Padrão de TC", "tc_padrao")]:
             v = str(a.get(campo) or "").strip()
             if v and v != "-":
                 st.markdown(f"**{rot}:** {v}")
+        ctr = str(a.get("controversias") or "").strip()
+        if ctr and ctr != "-":
+            st.info(f"**❓ Controvérsias / pontos em aberto:** {ctr}")
         ck = a.get("casos_chave") or []
         if ck:
             st.markdown("**Casos-chave:**")
