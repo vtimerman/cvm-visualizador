@@ -30,15 +30,27 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Coletar
         run: |
-          set +e
-          python scraper.py atualizar
-          python scraper_pas.py atualizar
-          python termos_baixar.py
-          python julgar_baixar.py
-          python sancionadores_julgados_baixar.py
-          python quem_baixar.py
-          python pautas_baixar.py
-          true
+          # Cada coletor roda isolado: um que quebre nao impede os demais nem o
+          # commit do que ja foi coletado, mas o nome dele fica em FALHAS e o
+          # step "Conferir falhas" derruba o run no fim. Nao use "set +e; ...;
+          # true" aqui: isso esconde a quebra e o run fica verde mentindo.
+          falhas=""
+          rodar() {
+            echo "::group::$*"
+            if ! python "$@"; then
+              echo "::error::coletor falhou: $*"
+              falhas="$falhas $1"
+            fi
+            echo "::endgroup::"
+          }
+          rodar scraper.py atualizar
+          rodar scraper_pas.py atualizar
+          rodar termos_baixar.py
+          rodar julgar_baixar.py
+          rodar sancionadores_julgados_baixar.py
+          rodar quem_baixar.py
+          rodar pautas_baixar.py
+          echo "FALHAS=$falhas" >> "$GITHUB_ENV"
       - name: Commit, push e alerta
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -63,3 +75,16 @@ jobs:
           python alertas_compostos.py || true
           git add alertas.db 2>/dev/null || true
           git diff --cached --quiet || { git commit -m "chore: estado de alertas"; git pull --rebase -X ours origin main || true; git push origin HEAD:main; }
+
+      - name: Conferir falhas
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "${FALHAS// /}" ]; then
+            echo "::error::coletores que falharam:$FALHAS"
+            python notificar.py "ALERTA Coleta CVM (30min) FALHOU em:$FALHAS" || true
+            exit 1
+          fi
+          echo "todos os coletores rodaram sem erro"
