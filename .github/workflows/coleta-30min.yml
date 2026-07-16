@@ -18,9 +18,12 @@ jobs:
   coleta:
     runs-on: ubuntu-latest
     # Rede de seguranca: sem isto, um coletor travado roda ate o limite de 6h do
-    # GitHub e (com cancel-in-progress: false) segura o grupo, pulando os ciclos
-    # de 30 min seguintes. 25 min < 30 min garante que a cadencia nunca quebre.
-    timeout-minutes: 25
+    # GitHub e (com cancel-in-progress: false) segura o grupo, pulando muitos
+    # ciclos de 30 min. Runs saudaveis levam ~25-32 min (7 coletores + poppler),
+    # entao o teto fica acima disso, mas bem abaixo das 6h: numa queda de rede
+    # (a CVM bloqueia certos IPs de nuvem do GitHub de forma intermitente) o job
+    # morre em 40 min e o proximo run — com outro IP de runner — tenta de novo.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
