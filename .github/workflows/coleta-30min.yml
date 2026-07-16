@@ -17,6 +17,10 @@ concurrency:
 jobs:
   coleta:
     runs-on: ubuntu-latest
+    # Rede de seguranca: sem isto, um coletor travado roda ate o limite de 6h do
+    # GitHub e (com cancel-in-progress: false) segura o grupo, pulando os ciclos
+    # de 30 min seguintes. 25 min < 30 min garante que a cadencia nunca quebre.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:

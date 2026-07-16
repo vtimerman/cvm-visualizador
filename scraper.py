@@ -29,6 +29,11 @@ BASE = "https://sistemas.cvm.gov.br/aplicacoes/cap/consulta/audiencia.asp?id="
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
 PAUSA = float(os.environ.get("PAUSA", "0.5"))
 LIMITE_SUPERIOR = int(os.environ.get("LIMITE_SUPERIOR", "33000"))
+# Disjuntor de rede: apos N erros de rede seguidos, aborta a rodada (site da CVM
+# indisponivel do runner). Evita o loop infinito que rodava ate o limite de 6h do
+# GitHub e travava o ciclo de 30 min. Ids em erro nao sao gravados: a proxima
+# rodada os reprocessa a partir de max_valido+1.
+MAX_ERROS_SEGUIDOS = int(os.environ.get("MAX_ERROS_SEGUIDOS", "10"))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiencias.db"))
 
 COLS = [
@@ -262,6 +267,7 @@ def cmd_atualizar():
         return
     id_ = m + 1
     vazios = 0
+    erros = 0
     novos = []
     print(f"[atualizar] a partir de {id_} (topo atual={m})")
     while vazios < 100:
@@ -269,9 +275,18 @@ def cmd_atualizar():
         if estado == "valido":
             novos.append(id_)
             vazios = 0
+            erros = 0
             print(f"  novo registro id={id_}")
         elif estado == "vazio":
             vazios += 1
+            erros = 0
+        else:  # erro de rede: nao grava, nao mexe em vazios
+            erros += 1
+            if erros >= MAX_ERROS_SEGUIDOS:
+                print(f"[atualizar] {erros} erros de rede seguidos — CVM "
+                      f"indisponivel, abortando rodada (retoma na proxima).",
+                      file=sys.stderr)
+                break
         con.commit()
         id_ += 1
         time.sleep(PAUSA)
@@ -312,10 +327,21 @@ def cmd_atualizar():
 def revisar_ids(con, ids):
     """Re-busca uma lista de ids 'vazio' e promove os que ganharam conteudo."""
     prom = 0
+    erros = 0
     for i, id_ in enumerate(ids, 1):
-        if coletar_um(con, id_) == "valido":
+        estado = coletar_um(con, id_)
+        if estado == "valido":
             prom += 1
+            erros = 0
             print(f"  promovido id={id_}")
+        elif estado == "erro":
+            erros += 1
+            if erros >= MAX_ERROS_SEGUIDOS:
+                print(f"[revisar] {erros} erros de rede seguidos — CVM "
+                      f"indisponivel, abortando revisao.", file=sys.stderr)
+                break
+        else:
+            erros = 0
         con.commit()
         if i % 200 == 0:
             print(f"  ... revisados {i}/{len(ids)} ({prom} promovidos)")
