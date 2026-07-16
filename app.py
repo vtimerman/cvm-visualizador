@@ -729,6 +729,13 @@ def _to_date(s):
     return dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
 
 
+def _ultima_mov(data_fase, data_local):
+    """Data da última movimentação do PAS: a mais recente entre a mudança de fase
+    e a movimentação de local (ambas DD/MM/AAAA). '' se nenhuma registrada."""
+    ds = [d for d in (_to_date(data_fase), _to_date(data_local)) if d]
+    return max(ds).strftime("%d/%m/%Y") if ds else ""
+
+
 def _dias_desde(s):
     """Nº de dias de uma data DD/MM/AAAA até hoje (int, ordenável). None se inválida."""
     d = _to_date(s)
@@ -944,6 +951,8 @@ def render_processos_lista():
     res["relator_atual"] = res["numero"].map(
         lambda n: mapa_rel.get(_norm_proc(n), ("",))[0])
     res["tc"] = res["numero"].map(lambda n: m_tc.get(_norm_proc(n), ""))
+    res["ultima_mov"] = res.apply(
+        lambda r: _ultima_mov(r["data_fase"], r["data_local"]), axis=1)
     st.metric("Processos encontrados", f"{len(res):,}".replace(",", "."))
     ncruz = int((res["relator_atual"] != "").sum())
     if len(mapa_rel):
@@ -952,16 +961,18 @@ def render_processos_lista():
                    "despachos relacionados aparecem no detalhe (a cobertura cresce "
                    "conforme as bases avançam).")
 
-    cols = ["numero", "data_abertura", "fase", "encarregado", "relator_atual",
-            "tc", "acusados", "link"]
+    cols = ["numero", "data_abertura", "ultima_mov", "fase", "encarregado",
+            "relator_atual", "tc", "acusados", "link"]
     show = res[cols].rename(columns={
-        "numero": "Processo", "data_abertura": "Abertura", "fase": "Fase",
+        "numero": "Processo", "data_abertura": "Abertura",
+        "ultima_mov": "Últ. movimentação", "fase": "Fase",
         "encarregado": "Encarregado", "relator_atual": "Relator (inform.)",
         "tc": "Termo Compr.", "acusados": "Acusados", "link": "Link"})
     st.caption("👆 Clique numa linha para ver acusados, relatoria, Termo de "
                "Compromisso e despachos relacionados.")
     ev = tabela(
-        show, datas=["Abertura"], use_container_width=True, hide_index=True, height=460,
+        show, datas=["Abertura", "Últ. movimentação"],
+        use_container_width=True, hide_index=True, height=460,
         on_select="rerun", selection_mode="single-row",
         column_config={"Link": st.column_config.LinkColumn("Link", display_text="abrir ↗")})
     st.download_button("⬇️ Baixar (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
