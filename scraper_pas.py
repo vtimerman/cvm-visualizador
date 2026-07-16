@@ -32,6 +32,11 @@ PAUSA = float(os.environ.get("PAUSA", "0.2"))
 WORKERS = int(os.environ.get("WORKERS", "1"))
 DB_PATH = os.environ.get("PAS_DB_PATH", os.path.join(DIR, "processos.db"))
 LIMITE = int(os.environ.get("PAS_LIMITE", "13000"))
+# Disjuntor de rede: apos N erros de rede seguidos, aborta a rodada (CVM
+# indisponivel do runner). Sem isto, cmd_atualizar girava id a id ate o limite
+# de 6h do GitHub. Ids em erro nao sao gravados: a proxima rodada os reprocessa
+# a partir de max_valido+1. Mesmo padrao de scraper.py.
+MAX_ERROS_SEGUIDOS = int(os.environ.get("MAX_ERROS_SEGUIDOS", "10"))
 
 COLS_P = ["idproc", "estado", "numero", "objeto", "ementa", "data_abertura",
           "data_iso", "encarregado", "fase", "subfase", "data_fase",
@@ -289,11 +294,20 @@ def cmd_atualizar():
         return
     idp = m + 1
     vazios = 0
+    erros = 0
     novos = 0
     print(f"[pas atualizar] a partir de {idp} (topo={m})")
     while vazios < 300:                    # esparso: tolerância alta de vazios
         res = baixar_parse_full(idp)
-        if res:
+        if res is None:                    # erro de rede: nao grava, nao mexe em vazios
+            erros += 1
+            if erros >= MAX_ERROS_SEGUIDOS:
+                print(f"[pas atualizar] {erros} erros de rede seguidos — CVM "
+                      f"indisponivel, abortando rodada (retoma na proxima).",
+                      file=sys.stderr)
+                break
+        else:
+            erros = 0
             _gravar(con, res[0], res[1])
             if res[0]["estado"] == "valido":
                 novos += 1
