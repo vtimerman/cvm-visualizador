@@ -1,9 +1,13 @@
 name: coleta-semanal
 
-# Re-varredura pesada dos Sancionadores (segunda ~07:30 BRT = 10:30 UTC).
+# Re-varredura pesada dos Sancionadores (QUARTA ~07:30 BRT = 10:30 UTC).
+# Ela e' a auto-cura dos PAS: a CVM preenche idProc ABAIXO do topo, e o
+# scraper_pas.py atualizar so varre para frente — sem esta varredura total, um
+# PAS preenchido em id baixo fica invisivel para sempre (aconteceu com o 13146,
+# 19957.011288/2026-14). Por isso ela precisa CONCLUIR, nao so disparar.
 on:
   schedule:
-    - cron: "30 10 * * 1"
+    - cron: "30 10 * * 3"
   workflow_dispatch: {}
 
 permissions:
@@ -16,6 +20,10 @@ concurrency:
 jobs:
   coleta:
     runs-on: ubuntu-latest
+    # O unico run que existiu (13/07) morreu no teto de 6h do GitHub: rodava com
+    # WORKERS=1 (padrao) sobre ~12.9k ids. Com WORKERS=6 a varredura sadia leva
+    # ~20 min; 90 min da folga larga e ainda mata uma trava cedo.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,6 +34,8 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Re-varrer sancionadores
+        env:
+          WORKERS: "6"   # sem isto o padrao e' 1 worker e a varredura nao termina
         run: |
           # Ver comentario em coleta-30min.yml: falha de um coletor nao pode
           # deixar o run verde.
@@ -38,7 +48,9 @@ jobs:
             fi
             echo "::endgroup::"
           }
-          rodar scraper_pas.py revarrer 1 13500
+          # Teto acima do maior idProc ja visto (13534) — com 13500 a varredura
+          # nao alcancava o topo da base.
+          rodar scraper_pas.py revarrer 1 13800
           rodar scraper_pas.py stats
           echo "FALHAS=$falhas" >> "$GITHUB_ENV"
       - name: Commit, push e alerta
