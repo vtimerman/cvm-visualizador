@@ -222,8 +222,16 @@ def parse_acusado_hist(texto):
     return hist
 
 
+# Disjuntor do revarrer: uma vez aberto, as chamadas restantes voltam na hora
+# sem tocar a rede. Necessario porque o ThreadPoolExecutor.map ja submeteu TODOS
+# os ids: sair do laco nao cancela o resto (o with esperaria ~13k timeouts).
+_circuito_aberto = False
+
+
 def baixar_parse_full(idproc):
     """Baixa o processo e (se válido) o histórico de cada acusado. Sem tocar no banco."""
+    if _circuito_aberto:                       # CVM caiu: nem tenta
+        return None
     try:
         texto = baixar(URL_PROC + str(idproc))
     except Exception as e:
@@ -331,12 +339,21 @@ def cmd_revarrer(ini=1, fim=None):
         "SELECT idproc FROM processos WHERE estado='valido'")}
     alvo = [i for i in range(ini, fim + 1) if i not in validos]
     print(f"[pas revarrer] {ini}..{fim}: {len(alvo)} ids vazios/novos; workers={WORKERS}")
-    novos = feitos = 0
+    global _circuito_aberto
+    _circuito_aberto = False
+    novos = feitos = erros = 0
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max(WORKERS, 1)) as ex:
         for res in ex.map(baixar_parse_full, alvo):
-            if res is None:
+            if res is None:                    # erro de rede (ou circuito aberto)
+                erros += 1
+                if erros >= MAX_ERROS_SEGUIDOS and not _circuito_aberto:
+                    _circuito_aberto = True
+                    print(f"[pas revarrer] {erros} erros de rede seguidos — CVM "
+                          f"indisponivel, abortando (retoma na proxima).",
+                          file=sys.stderr)
                 continue
+            erros = 0
             _gravar(con, res[0], res[1])
             feitos += 1
             if res[0]["estado"] == "valido":

@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Re-varrer sancionadores
+      - name: Varredura profunda
         env:
           WORKERS: "6"   # sem isto o padrao e' 1 worker e a varredura nao termina
         run: |
@@ -52,6 +52,13 @@ jobs:
           # nao alcancava o topo da base.
           rodar scraper_pas.py revarrer 1 13800
           rodar scraper_pas.py stats
+          # Audiencias: o ciclo de 30 min para no muro de 100 vazios, logo um
+          # salto de numeracao MAIOR que 100 deixaria o proximo despacho fora do
+          # alcance dele para sempre. O backfill so busca ids AINDA NAO
+          # conhecidos, entao isto varre exatamente a fronteira a frente (~2,7k
+          # ids hoje) e se auto-ajusta conforme a base cresce.
+          rodar scraper.py backfill 1 35000
+          rodar scraper.py stats
           echo "FALHAS=$falhas" >> "$GITHUB_ENV"
       - name: Commit, push e alerta
         env:

@@ -200,9 +200,17 @@ def coletar_um(con, id_: int) -> str:
 # ---------------------------------------------------------------------------
 # Comandos
 # ---------------------------------------------------------------------------
+# Disjuntor do backfill: uma vez aberto, as chamadas restantes voltam na hora
+# sem tocar a rede. Necessario porque o ThreadPoolExecutor.map ja submeteu TODOS
+# os ids: sair do laco nao cancela o resto (o with esperaria milhares de timeouts).
+_circuito_aberto = False
+
+
 def baixar_parse(id_):
     """Baixa e interpreta um ID (SEM tocar no banco — seguro em paralelo).
     Retorna o registro (valido/vazio) ou None em erro de rede."""
+    if _circuito_aberto:                        # CVM caiu: nem tenta
+        return None
     try:
         texto = baixar(id_)
     except Exception as e:
@@ -222,14 +230,29 @@ def cmd_backfill(ini=1, fim=None):
     ja = ids_existentes(con)
     pend = [i for i in range(ini, fim + 1) if i not in ja]
     print(f"[backfill] {ini}..{fim}: {len(pend)} a coletar; workers={workers}; pausa={PAUSA}s")
-    feitos = 0
+    global _circuito_aberto
+    _circuito_aberto = False
+    feitos = erros = 0
+
+    def _abriu_circuito():
+        """True quando a CVM caiu de vez: para de insistir nos ids restantes."""
+        nonlocal erros
+        erros += 1
+        if erros >= MAX_ERROS_SEGUIDOS and not _circuito_aberto:
+            globals()["_circuito_aberto"] = True
+            print(f"[backfill] {erros} erros de rede seguidos — CVM indisponivel, "
+                  f"abortando (retoma na proxima).", file=sys.stderr)
+        return True
+
     if workers > 1:
         # rede em paralelo (workers threads); gravacao so na thread principal
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for reg in ex.map(baixar_parse, pend):
                 if reg is None:
+                    _abriu_circuito()
                     continue
+                erros = 0
                 upsert(con, reg)
                 feitos += 1
                 if feitos % 300 == 0:
@@ -238,7 +261,12 @@ def cmd_backfill(ini=1, fim=None):
     else:
         for id_ in pend:
             reg = baixar_parse(id_)
-            if reg is not None:
+            if reg is None:
+                _abriu_circuito()
+                if _circuito_aberto:
+                    break
+            else:
+                erros = 0
                 upsert(con, reg)
                 feitos += 1
             if feitos and feitos % 100 == 0:
@@ -269,6 +297,10 @@ def cmd_atualizar():
     vazios = 0
     erros = 0
     novos = []
+    # O muro de 100 vazios pressupoe numeracao densa. Um salto MAIOR que isso
+    # deixaria o proximo despacho fora do alcance desta varredura — quem cobre
+    # esse caso e' a varredura profunda semanal (scraper.py backfill), que varre
+    # a faixa inteira a frente em vez de apostar em sondas pontuais.
     print(f"[atualizar] a partir de {id_} (topo atual={m})")
     while vazios < 100:
         estado = coletar_um(con, id_)
