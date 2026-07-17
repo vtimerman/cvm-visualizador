@@ -73,7 +73,7 @@ jobs:
           git commit -m "chore(coleta-30min): $CHANGED"
           git pull --rebase -X ours origin main || true
           git push origin HEAD:main
-          python notificar.py "Coleta CVM (30min): atualizados $CHANGED" || true
+          python notificar.py "Coleta CVM (30min): atualizados $CHANGED" || echo "::warning::notificacao nao enviada (conferir secrets TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)"
       - name: Alertas cruzados
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -91,7 +91,7 @@ jobs:
         run: |
           if [ -n "${FALHAS// /}" ]; then
             echo "::error::coletores que falharam:$FALHAS"
-            python notificar.py "ALERTA Coleta CVM (30min) FALHOU em:$FALHAS" || true
+            python notificar.py "ALERTA Coleta CVM (30min) FALHOU em:$FALHAS" || echo "::warning::notificacao nao enviada (conferir secrets TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)"
             exit 1
           fi
           echo "todos os coletores rodaram sem erro"

@@ -1,0 +1,38 @@
+name: notificar-teste
+
+# Canario do canal de alerta: manda uma mensagem de teste pelo notificar.py.
+# Existe porque o Telegram ficou 12 dias mudo sem ninguem notar — os secrets
+# TELEGRAM_* nunca tinham sido criados e o "|| true" das coletas engolia a
+# falha. Rode este workflow sempre que quiser conferir se o alarme funciona
+# (e depois de trocar token/chat_id).
+#
+#   gh workflow run notificar-teste.yml
+#
+# Sem cron de proposito: e' um botao, nao uma rotina.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  testar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Enviar mensagem de teste
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Sem "|| true": aqui a falha DEVE derrubar o run — o objetivo e'
+          # justamente saber se a mensagem chega. notificar.py sai com 2 quando
+          # nao envia (sem credenciais, 403 do Telegram, etc.).
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::error::secrets TELEGRAM_TOKEN/TELEGRAM_CHAT_ID nao configurados no repo"
+            echo "Cadastre com: gh secret set TELEGRAM_TOKEN ; gh secret set TELEGRAM_CHAT_ID"
+            exit 1
+          fi
+          python notificar.py --teste
