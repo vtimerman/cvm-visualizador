@@ -42,8 +42,11 @@ jobs:
         env:
           PAUSA: "0.2"
           WORKERS: "6"
-          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
-          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          # scraper.py avisa audiencia nova via notificar.py (Telegram). Antes
+          # aqui vinham WHATSAPP_PHONE/CALLMEBOT_APIKEY, do canal antigo: os
+          # scripts nao os usam mais, entao o aviso saia no vazio.
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           modo="${{ github.event.inputs.modo }}"
           fonte="${{ github.event.inputs.fonte }}"
@@ -63,7 +66,8 @@ jobs:
             # Decisoes e Atas do Colegiado: pull incremental (barato)
             python decisoes_baixar.py || true
             # Processos Sancionadores: 1x/dia (por volta das 09h UTC), nao a cada 30min.
-            # (a re-varredura de ids vazios roda localmente, semanal - e' pesada)
+            # (a re-varredura de ids vazios roda na nuvem, em coleta-semanal.yml,
+            #  as quartas - e' pesada)
             hora=$(date -u +%H)
             if [ "$hora" = "09" ]; then
               python scraper_pas.py atualizar
@@ -71,13 +75,14 @@ jobs:
             fi
           fi
 
-      - name: Avisar falha no WhatsApp
+      - name: Avisar falha
         if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -G "https://api.callmebot.com/whatsapp.php" \
-            --data-urlencode "phone=${{ secrets.WHATSAPP_PHONE }}" \
-            --data-urlencode "apikey=${{ secrets.CALLMEBOT_APIKEY }}" \
-            --data-urlencode "text=Falha na coleta de Audiencias CVM. Veja: https://github.com/vtimerman/cvm-visualizador/actions" || true
+          python notificar.py "ALERTA: falha no backfill manual da CVM. Veja: https://github.com/vtimerman/cvm-visualizador/actions" \
+            || echo "::warning::notificacao nao enviada (conferir secrets TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)"
 
       - name: Publicar base atualizada
         run: |

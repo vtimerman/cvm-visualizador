@@ -323,7 +323,8 @@ def cmd_atualizar():
         id_ += 1
         time.sleep(PAUSA)
 
-    # Notifica UMA vez por rodada (resumo) — evita estourar o limite do CallMeBot.
+    # Notifica UMA vez por rodada (resumo). O teto existe para nao inundar o
+    # Telegram numa carga grande (era o limite do CallMeBot, canal ja aposentado).
     limite = int(os.environ.get("MAX_NOTIF", "40"))
     if 0 < len(novos) <= limite:
         if len(novos) == 1:
