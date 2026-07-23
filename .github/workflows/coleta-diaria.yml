@@ -49,6 +49,7 @@ jobs:
           rodar boletim_pessoal_extrair.py tudo
           rodar scraper.py revisar
           rodar conduta_build.py build
+          rodar pessoas_build.py
           echo "FALHAS=$falhas" >> "$GITHUB_ENV"
       - name: Commit, push e alerta
         env:

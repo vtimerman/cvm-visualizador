@@ -3366,16 +3366,19 @@ def render_organograma():
 
 def _ficha_servidor(nome):
     """Tudo sobre um servidor: viagens, boletins que o citam e menções no SEI."""
-    st.markdown(f"### 🗂️ {nome}")
-    k = _ent_key(nome)
+    _, nome_can = canon_pessoa(nome)
+    st.markdown(f"### 🗂️ {nome_can}")
+    skeys = _servidor_keys_de(nome)          # todas as grafias da MESMA pessoa
+    ph = ",".join("?" * len(skeys))
     con = sqlite3.connect(PESSOAL_DB_PATH)
-    vg = pd.read_sql("SELECT * FROM viagens WHERE servidor_key=:k", con,
-                     params={"k": k})
+    vg = pd.read_sql(f"SELECT * FROM viagens WHERE servidor_key IN ({ph})",
+                     con, params=skeys)
     try:
         mov = pd.read_sql(
             "SELECT tipo, funcao, codigo, sigla, unidade, cargo_efetivo, portaria, "
             "data_ato_iso, boletim_data_iso, link_boletim FROM movimentos WHERE "
-            "servidor_key=:k ORDER BY boletim_data_iso DESC", con, params={"k": k})
+            f"servidor_key IN ({ph}) ORDER BY boletim_data_iso DESC", con,
+            params=skeys)
     except Exception:
         mov = pd.DataFrame()
     bols = pd.read_sql(
@@ -3507,10 +3510,11 @@ def render_servidores():
     if (df is None or len(df) == 0) and (mov is None or len(mov) == 0):
         st.info("⏳ A base do Boletim de Pessoal ainda está sendo montada.")
         return
-    # ficha individual (viagens + trajetória de cargos)
-    nomes = sorted(set(
-        (list(df["servidor_nome"].dropna().unique()) if df is not None else [])
-        + (list(mov["servidor_nome"].dropna().unique()) if mov is not None else [])))
+    # ficha individual (viagens + trajetória de cargos) — nomes CANÔNICOS
+    # (dedup de grafias da mesma pessoa via registro).
+    _nm = ((list(df["servidor_nome"].dropna().unique()) if df is not None else [])
+           + (list(mov["servidor_nome"].dropna().unique()) if mov is not None else []))
+    nomes = sorted({canon_pessoa(n)[1] for n in _nm})
     sel_srv = st.selectbox("🗂️ Buscar servidor (abre a ficha completa)", nomes,
                            key="srv_ficha", index=None,
                            placeholder="digite um nome…")
@@ -3620,15 +3624,16 @@ def render_servidores():
     res["_dias"] = res.apply(
         lambda r: _dias_periodo(r["periodo_ini"])
         if r["tipo"] == "afastamento_pais" else 0, axis=1)
-    # ranking por servidor: viagens, dias viajando (exterior) e custo de diárias
-    rk = (res.groupby("servidor_nome").agg(
-        Viagens=("servidor_nome", "size"),
+    # ranking por PESSOA CANÔNICA (funde grafias da mesma pessoa)
+    res["Servidor"] = res["servidor_nome"].map(lambda n: canon_pessoa(n)[1])
+    rk = (res.groupby("Servidor").agg(
+        Viagens=("Servidor", "size"),
         **{"Dias viajando (exterior)": ("_dias", "sum"),
            "Custo diárias (R$)": ("_val", "sum")})
         .reset_index().sort_values("Custo diárias (R$)", ascending=False))
     c1, c2, c3 = st.columns(3)
     c1.metric("Viagens encontradas", f"{len(res):,}".replace(",", "."))
-    c2.metric("Servidores", f"{res['servidor_key'].nunique():,}".replace(",", "."))
+    c2.metric("Servidores", f"{res['Servidor'].nunique():,}".replace(",", "."))
     c3.metric("💰 Custo diárias (R$)",
               f"{res['_val'].sum():,.0f}".replace(",", "."))
     st.markdown("**Servidores por custo de diárias / viagens (no filtro):**")
@@ -3730,16 +3735,22 @@ def _agentes_tese():
 
 
 _TEMA_LABEL = {
-    "insider_trading": "Insider trading", "manipulacao_fraude": "Manipulação/fraude",
+    "insider_trading": "Insider trading",
+    "manipulacao_mercado": "Manipulação de mercado",
+    "fraude_esquemas": "Fraude / esquemas",
+    "manipulacao_fraude": "Manipulação/fraude",
     "fato_relevante_dri": "Fato relevante / DRI",
     "dever_diligencia_adm": "Dever de diligência (adm.)",
-    "abuso_controle": "Abuso de controle", "carteira_irregular": "Carteira irregular",
+    "abuso_controle": "Abuso de controle",
+    "administracao_carteira": "Administração de carteira",
+    "atividade_sem_registro": "Atividade sem registro",
+    "carteira_irregular": "Carteira irregular",
     "fundos_investimento": "Fundos", "ofertas_publicas": "Ofertas públicas",
     "auditoria": "Auditoria", "intermediarios": "Intermediários",
     "informacoes_periodicas": "Informações periódicas",
     "assembleia_conflito": "Assembleia / conflito",
     "agentes_autonomos": "Agentes autônomos", "rito_processual": "Rito/prescrição",
-    "outros": "Outros"}
+    "nao_classificado": "Não classificado", "outros": "Outros"}
 
 
 def _teses_html(pn, e):
@@ -4330,6 +4341,75 @@ def _ent_key(nome):
     return re.sub(r"\s+", " ", s).strip().upper()
 
 
+# --------------------------------------------------------------------------
+# Registro canônico de pessoas (pessoas_build.py) — nome único por pessoa,
+# usado em pesquisas/direcionamentos e na atribuição de viagens.
+# --------------------------------------------------------------------------
+def _canon_key(nome):
+    """Mesma normalização do pessoas_build (UPPER, sem acento/pontuação)."""
+    s = unicodedata.normalize("NFKD", str(nome or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Za-z ]", " ", s).upper()).strip()
+
+
+@st.cache_data(ttl=600)
+def _canon_reg():
+    """(alias_key->person_id, person_id->{nome,aliases,cpf,e_diretor,cargo,sigla})."""
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return {}, {}
+    con = sqlite3.connect(PESSOAL_DB_PATH)
+    try:
+        alias = {k: pid for k, pid in con.execute(
+            "SELECT alias_key, person_id FROM pessoa_alias")}
+        pes = {}
+        for pid, nome, ed, cargo, sigla, cpf, al in con.execute(
+                "SELECT person_id,nome_canonico,e_diretor_atual,cargo,sigla,"
+                "cpf,aliases_json FROM pessoas"):
+            pes[pid] = {"nome": nome, "e_diretor": ed, "cargo": cargo,
+                        "sigla": sigla, "cpf": cpf,
+                        "aliases": json.loads(al) if al else []}
+    except sqlite3.OperationalError:
+        con.close()
+        return {}, {}
+    con.close()
+    return alias, pes
+
+
+def canon_pessoa(nome):
+    """(person_id, nome_canonico) de qualquer grafia; fallback ao nome dado."""
+    alias, pes = _canon_reg()
+    pid = alias.get(str(nome)) or alias.get(_canon_key(nome))
+    if pid and pid in pes:
+        return pid, pes[pid]["nome"]
+    return None, str(nome)
+
+
+def _servidor_keys_de(nome):
+    """servidor_key (grafias-DB) da pessoa, p/ WHERE servidor_key IN (...)."""
+    pid, _ = canon_pessoa(nome)
+    if pid:
+        _, pes = _canon_reg()
+        ks = [a for a in pes[pid]["aliases"] if a and a.upper() == a]
+        return ks or [_ent_key(nome)]
+    return [_ent_key(nome)]
+
+
+def _cpf_de(nome):
+    pid, _ = canon_pessoa(nome)
+    if pid:
+        _, pes = _canon_reg()
+        return pes[pid].get("cpf") or ""
+    return ""
+
+
+@st.cache_data(ttl=600)
+def diretores_atuais():
+    """Nomes canônicos do Colegiado ATUAL (quem.db e_relator=1, via registro)."""
+    _, pes = _canon_reg()
+    return sorted(p["nome"] for p in pes.values() if p.get("e_diretor"))
+
+
 @st.cache_data(ttl=600)
 def _indice_entidades():
     """entidade_key -> aparições em todas as bases (acusado, TC, audiências)."""
@@ -4745,6 +4825,62 @@ def _dados_ficha_diretor(d):
     return ev, pz, perfil, (json.loads(dossie[0]) if dossie else {}), ana
 
 
+def _render_aderencia_diretor(d):
+    """Perfil de aderência jurisprudencial do diretor: relatorias + votos.
+
+    Agrega aderencia_juris (relatorias) e aderencia_voto (posições em casos
+    que votou sem relatar) para mostrar a postura do diretor frente às teses.
+    """
+    if not os.path.exists(CONDUTA_DB_PATH):
+        return
+    con = sqlite3.connect(CONDUTA_DB_PATH)
+    try:
+        rel = con.execute(
+            "SELECT veredito, COUNT(*) FROM aderencia_juris WHERE relator=? "
+            "GROUP BY veredito", (d,)).fetchall()
+        votos = con.execute(
+            "SELECT papel, veredito, tema, posicao, proc_norm FROM "
+            "aderencia_voto WHERE diretor=?", (d,)).fetchall()
+    except Exception:
+        con.close()
+        return
+    con.close()
+    if not rel and not votos:
+        return
+    st.markdown("---")
+    st.markdown("### ⚖️ Perfil de aderência à jurisprudência")
+    if rel:
+        dd = {(v or "—"): n for v, n in rel}
+        tot = sum(dd.values())
+        partes = []
+        for k in ("aderente", "caso_fundador", "parcialmente_aderente",
+                  "diverge", "inconclusivo"):
+            if dd.get(k):
+                ic, rot = _ADERENCIA_BADGE.get(k, ("", k))
+                partes.append(f"{ic} {dd[k]} {rot.lower()}")
+        st.markdown(f"**Como relator ({tot} casos):** " + "  ·  ".join(partes))
+    subst = [v for v in votos if v[0] in ("divergiu", "vencido", "pediu_vista")]
+    if subst:
+        st.markdown(f"**Posições próprias fora da relatoria "
+                    f"({len(subst)} divergências / vencidos / vistas), por tese:**")
+        portema = {}
+        for v in subst:
+            portema.setdefault(v[2] or "—", []).append(v)
+        for tema, vs in sorted(portema.items(), key=lambda kv: -len(kv[1])):
+            tl = _TEMA_LABEL.get(tema, tema)
+            st.markdown(f"**{tl}** ({len(vs)})")
+            for papel, ver, _t, pos, pn in vs:
+                pl = _PAPEL_LABEL.get(papel, papel)
+                st.markdown(f"- {pl} · `{pn}`")
+                if str(pos or "").strip():
+                    st.caption(str(pos).strip())
+    elif votos:
+        st.caption("Nos casos em que votou sem relatar, acompanhou a maioria "
+                   "(sem divergências ou votos vencidos registrados).")
+    st.caption("🤖 Agregado das análises de aderência por processo (conduta.db). "
+               "Confira sempre no inteiro teor.")
+
+
 # palavras-chave por tema, para mapear uma hipótese textual da IA a casos concretos
 _TEMA_KW = {
     "insider_trading": ["insider", "informacao privilegiada", "informação privilegiada",
@@ -4826,6 +4962,27 @@ def _conduta_analise_do_proc(pn):
                 out["data"] = jr[6]
     except Exception:
         pass
+    # Relatório de aderência à jurisprudência (relator atual × tese consolidada)
+    try:
+        ar = con.execute("SELECT relatorio, veredito, tema FROM aderencia_juris "
+                         "WHERE proc_norm=? AND ai_feito=1", (pn,)).fetchone()
+        if ar and ar[0]:
+            rel = json.loads(ar[0])
+            rel["_tema"] = ar[2]
+            out["aderencia"] = rel
+    except Exception:
+        pass
+    # Posição de voto de cada diretor atual (não só o relator)
+    try:
+        out["votos_diretores"] = [
+            {"diretor": r[0], "papel": r[1], "veredito": r[2], "posicao": r[3]}
+            for r in con.execute(
+                "SELECT diretor, papel, veredito, posicao FROM aderencia_voto "
+                "WHERE proc_norm=? ORDER BY CASE papel WHEN 'relator' THEN 0 "
+                "WHEN 'divergiu' THEN 1 WHEN 'vencido' THEN 1 "
+                "WHEN 'pediu_vista' THEN 2 ELSE 5 END, diretor", (pn,))]
+    except Exception:
+        out["votos_diretores"] = []
     con.close()
     return out
 
@@ -4835,6 +4992,88 @@ def _melhor(*vals):
     cands = [str(v).strip() for v in vals if v and str(v).strip()
              and str(v).strip() != "-"]
     return max(cands, key=len) if cands else ""
+
+
+_ADERENCIA_BADGE = {
+    "aderente": ("🟢", "Aderente à jurisprudência"),
+    "caso_fundador": ("🔵", "Caso fundador da tese"),
+    "parcialmente_aderente": ("🟠", "Parcialmente aderente"),
+    "diverge": ("🔴", "Diverge da jurisprudência"),
+    "inconclusivo": ("⚪", "Inconclusivo (material insuficiente)"),
+}
+
+
+def _render_aderencia(ad):
+    """Seção da ficha: aderência do voto do relator à jurisprudência consolidada.
+
+    Gerada por IA cotejando o voto do relator (diretor atual) com o dossiê do
+    agente da tese correspondente (agentes_tese em conduta.db).
+    """
+    if not ad:
+        return
+    ver = str(ad.get("veredito") or "").lower().strip()
+    icon, rot = _ADERENCIA_BADGE.get(ver, ("⚪", ver or "—"))
+    tema = _TEMA_LABEL.get(ad.get("_tema", ""), ad.get("_tema", ""))
+    st.markdown("---")
+    st.markdown(f"### ⚖️ Aderência à jurisprudência da CVM")
+    st.markdown(f"**{icon} {rot}**" + (f"  ·  tese: *{tema}*" if tema else ""))
+    sint = str(ad.get("sintese") or "").strip()
+    if sint:
+        st.write(sint)
+    pos = str(ad.get("posicao_do_relator") or "").strip()
+    if pos and pos != "-":
+        st.markdown(f"**Posição do relator:** {pos}")
+    conv = [c for c in (ad.get("convergencias") or []) if str(c).strip()]
+    if conv:
+        st.markdown("**Convergências com a jurisprudência:**")
+        for c in conv:
+            st.markdown(f"- {c}")
+    div = [d for d in (ad.get("divergencias") or []) if str(d).strip()]
+    if div:
+        st.markdown("**Divergências / inovações:**")
+        for d in div:
+            st.markdown(f"- {d}")
+    dos = str(ad.get("nota_dosimetria") or "").strip()
+    if dos and dos != "-":
+        st.caption("Dosimetria: " + dos)
+    prec = [p for p in (ad.get("precedentes_citados") or []) if str(p).strip()]
+    if prec:
+        st.caption("Precedentes relevantes: " + ", ".join(str(p) for p in prec))
+    st.caption("🤖 Cotejo gerado por IA entre o voto do relator e o dossiê da "
+               "tese consolidada. Confira sempre no inteiro teor.")
+
+
+_PAPEL_LABEL = {
+    "relator": "🖋️ Relator", "divergiu": "↔️ Divergiu", "vencido": "🚩 Vencido",
+    "pediu_vista": "👁️ Pediu vista", "presidiu": "⚖️ Presidiu",
+    "acompanhou": "➡️ Acompanhou", "impedido": "🚫 Impedido",
+    "ausente": "— Ausente"}
+
+
+def _render_votos_diretores(votos):
+    """Ficha: como cada diretor ATUAL se posicionou no caso (não só o relator).
+
+    Vem da tabela aderencia_voto (conduta.db); posicoes substantivas (divergiu/
+    vencido/vista/relator) analisadas por IA, 'acompanhou' preenchido em massa.
+    """
+    if not votos:
+        return
+    # destaca posicoes substantivas (não meramente 'acompanhou')
+    subst = [v for v in votos if v.get("papel") not in ("acompanhou", "presidiu")]
+    st.markdown("---")
+    st.markdown("### 🗳️ Posição dos diretores atuais")
+    if subst:
+        st.caption("Posições próprias (relatoria, divergência, vista) em destaque.")
+    for v in votos:
+        papel = _PAPEL_LABEL.get(v.get("papel", ""), v.get("papel", ""))
+        ver = str(v.get("veredito") or "").lower()
+        vic, _vr = _ADERENCIA_BADGE.get(ver, ("", ""))
+        pos = str(v.get("posicao") or "").strip()
+        st.markdown(f"**{v.get('diretor','')}** — {papel} {vic}")
+        if pos and pos != "-":
+            st.caption(pos)
+    st.caption("🤖 Posições substantivas cotejadas por IA com a tese consolidada; "
+               "votos de mera adesão preenchidos automaticamente. Confira no inteiro teor.")
 
 
 @st.dialog("Análise do caso (IA)", width="large")
@@ -4901,6 +5140,8 @@ def dialog_conduta_analise(pn):
             te = str(t.get("tese") or "").strip()
             if te:
                 st.markdown(f"- *{tm}:* {te}")
+    _render_aderencia(dd.get("aderencia"))
+    _render_votos_diretores(dd.get("votos_diretores"))
     temas = [t for t in dd.get("temas", []) if t and t != "outros"]
     if temas:
         st.caption("Temas: " + ", ".join(_TEMA_LABEL.get(t, t) for t in temas))
@@ -5171,23 +5412,14 @@ def _diretor_boletim(d):
     """Casa o nome curto do diretor com o nome completo do Boletim de Pessoal e
     retorna (mandato, n_viagens, dias_viajando). Mandato vem dos movimentos
     estatutários (Diretor/Presidente); viagens da tabela viagens."""
-    toks = [_ent_key(t) for t in str(d).split() if len(t) > 2]
-    if not toks or not os.path.exists(PESSOAL_DB_PATH):
+    if not os.path.exists(PESSOAL_DB_PATH):
+        return None, 0, 0
+    # Identidade via registro canônico: todas as grafias-DB da MESMA pessoa
+    # (sem colisão de homônimos, sem token-inclusion).
+    skeys = sorted(set(_servidor_keys_de(d)))
+    if not skeys:
         return None, 0, 0
     con = sqlite3.connect(PESSOAL_DB_PATH)
-    try:
-        nomes = [r[0] for r in con.execute(
-            "SELECT DISTINCT servidor_nome FROM movimentos "
-            "UNION SELECT DISTINCT servidor_nome FROM viagens")]
-    except Exception:
-        con.close()
-        return None, 0, 0
-    # agrega TODAS as variantes de grafia do nome (chaves distintas)
-    skeys = sorted({_ent_key(n) for n in nomes
-                    if all(t in _ent_key(n) for t in toks)})
-    if not skeys:
-        con.close()
-        return None, 0, 0
     ph = ",".join("?" * len(skeys))
     rows = con.execute(
         "SELECT tipo, boletim_data_iso FROM movimentos WHERE servidor_key IN "
@@ -5211,7 +5443,11 @@ def _diretor_boletim(d):
 
 
 def _pk_nome(n):
-    """Chave de pessoa (1º + último token), robusta a variantes de grafia."""
+    """Chave canônica de pessoa. Usa o person_id do registro (sem colidir
+    homônimos como os 4 'Lucas Silva'); fallback (1º, último token)."""
+    pid, _ = canon_pessoa(n)
+    if pid:
+        return ("PID", pid)
     toks = [t for t in _ent_key(n).split() if len(t) > 2]
     return (toks[0], toks[-1]) if len(toks) >= 2 else tuple(toks)
 
@@ -5761,6 +5997,7 @@ def render_ficha_diretor():
     c3.metric("🚫 Retiradas de pauta",
               int((ev["evento"] == "retirou_de_pauta").sum()))
     c4.metric("⛔ Impedimentos", int((ev["evento"] == "impedimento").sum()))
+    _render_aderencia_diretor(d)
     # ---- mandato e viagens internacionais (cruzamento com o Boletim) ------
     mand, n_vi, dias_vi = _diretor_boletim(d)
     if mand or n_vi:

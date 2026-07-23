@@ -31,11 +31,13 @@ DB = os.path.join(DIR, "conduta.db")
 # de forma tolerante)
 TAXONOMIA = {
     "insider_trading": r"informa[cç][aã]o privilegiada|insider|art\.? ?155.{0,20}4|vedacao a negocia|RCVM ?44|Res(olucao)? ?CVM ?(n.? ?)?44",
-    "manipulacao_fraude": r"manipula[cç]|condi[cç][oõ]es artificiais|opera[cç][aã]o fraudulenta|pr[aá]ticas n[aã]o equitativas|Instru[cç][aã]o (CVM )?(n.? ?)?0?8[ ,/]|RCVM ?62",
+    "manipulacao_mercado": r"manipula[cç][aã]o de (pre[cç]o|mercado)|condi[cç][oõ]es artificiais|pr[aá]ticas n[aã]o equitativas|cota[cç][aã]o artificial|spoofing|layering",
+    "fraude_esquemas": r"opera[cç][aã]o fraudulenta|fraude|pir[aâ]mide|esquema (ponzi|financeiro)|capta[cç][aã]o (irregular|ilegal)|cripto|Instru[cç][aã]o (CVM )?(n.? ?)?0?8[ ,/]|RCVM ?62",
     "fato_relevante_dri": r"fato relevante|art\.? ?157|divulga[cç][aã]o (imediata|tempestiva)|ICVM ?358|dever de informar",
     "dever_diligencia_adm": r"dever de dilig[eê]ncia|dever de lealdade|art\.? ?15[34]|administradores? da companhia|conselheir",
     "abuso_controle": r"abuso de poder de controle|art\.? ?11[67]",
-    "carteira_irregular": r"administra[cç][aã]o .{0,20}carteira.{0,40}(sem|irregular)|art\.? ?23 da Lei|RCVM ?21|sem pr[eé]via autoriza[cç][aã]o|exerc[ií]cio irregular",
+    "administracao_carteira": r"administra[cç][aã]o .{0,20}carteira|gest[aã]o de carteira|gestor de recursos|RCVM ?21\b",
+    "atividade_sem_registro": r"analista de valores|consultor de valores|art\.? ?23 da Lei|sem pr[eé]via autoriza[cç][aã]o|exerc[ií]cio irregular|atividade.{0,20}sem registro|RCVM ?(19|20)\b",
     "fundos_investimento": r"fundos? de investimento|ICVM ?555|RCVM ?175|FIDC|FII\b|desenquadramento|administrador fiduci|gestor de fundo",
     "ofertas_publicas": r"oferta p[uú]blica|ICVM ?400|RCVM ?160|esfor[cç]os restritos|ICVM ?476|crowdfunding|oferta irregular",
     "auditoria": r"auditor(ia)? independente|normas de auditoria",
@@ -147,6 +149,84 @@ def stats(con=None):
         con.close()
 
 
+def export_outros(saida):
+    """Seed p/ reclassificar via IA os casos hoje em 'outros'.
+
+    Cada caso ja tem UMA analise IA; o regex nao casou nenhum tema real e ele
+    caiu no balde. Exporta o texto para a IA escolher os temas reais.
+    """
+    con = conectar()
+    seed = []
+    for pn, tipo in con.execute(
+            "SELECT proc_norm, tipo FROM caso_tema WHERE tema='outros'"):
+        row = con.execute("SELECT analise FROM analises WHERE proc_norm=? AND "
+                          "tipo=?", (pn, tipo)).fetchone()
+        if not row:
+            continue
+        a = json.loads(row[0])
+        seed.append({"chave": f"{pn}|{tipo}",
+                     **{k: str(a.get(k) or "")[:600] for k in
+                        ("conduta_imputada", "resumo", "desfecho", "racional")}})
+    con.close()
+    json.dump({"temas_validos": ORDEM, "casos": seed},
+              open(saida, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(f"[reclasse] {len(seed)} casos 'outros' -> {saida}")
+
+
+def aplicar_reclasse(caminho):
+    """Aplica a reclassificacao IA. Entrada: {"<proc>|<tipo>": [temas...]}.
+
+    Ordem = prioridade (1o = dominante). So aceita temas da TAXONOMIA; 'outros'
+    e temas desconhecidos sao rejeitados (o objetivo e esvaziar o balde).
+    """
+    con = conectar()
+    dados = json.load(open(caminho, encoding="utf-8"))
+    validos = set(ORDEM)
+    ok = ignorados = 0
+    for chave, temas in dados.items():
+        pn, _, tipo = chave.partition("|")
+        pn = pn.strip()
+        temas = [t for t in (temas or []) if t in validos]
+        if not pn or tipo not in ("julgado", "tc") or not temas:
+            print(f"  ! sem tema valido, mantido em outros: {chave}",
+                  file=sys.stderr)
+            ignorados += 1
+            continue
+        con.execute("DELETE FROM caso_tema WHERE proc_norm=? AND tipo=?",
+                    (pn, tipo))
+        for i, tema in enumerate(temas):
+            con.execute("INSERT OR REPLACE INTO caso_tema VALUES(?,?,?,?)",
+                        (pn, tipo, tema, 1 if i == 0 else 0))
+        ok += 1
+    con.commit()
+    print(f"[reclasse] {ok} casos reclassificados, {ignorados} mantidos em outros.")
+    stats(con)
+    con.close()
+
+
+def marcar_naoclass():
+    """Renomeia o balde 'outros' para 'nao_classificado' (status, nao tese).
+
+    Usado apos aplicar_reclasse: o que sobra em 'outros' e' o que nao deu para
+    classificar a partir do acervo local — vira backlog honesto, nao um agente.
+    """
+    con = conectar()
+    n = con.execute("UPDATE caso_tema SET tema='nao_classificado' WHERE "
+                    "tema='outros'").rowcount
+    con.commit()
+    con.close()
+    print(f"[reclasse] {n} casos 'outros' -> 'nao_classificado'.")
+
+
+def remover_agente(tema):
+    """Remove um agente/dossie da agentes_tese (ex.: 'outros')."""
+    con = conectar()
+    n = con.execute("DELETE FROM agentes_tese WHERE tema=?", (tema,)).rowcount
+    con.commit()
+    con.close()
+    print(f"[reclasse] agente '{tema}' removido ({n} linha).")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "stats"
     if cmd == "classificar":
@@ -155,6 +235,14 @@ if __name__ == "__main__":
         material(sys.argv[2], sys.argv[3])
     elif cmd == "aplicar_ia":
         aplicar_ia(sys.argv[2])
+    elif cmd == "export_outros":
+        export_outros(sys.argv[2])
+    elif cmd == "aplicar_reclasse":
+        aplicar_reclasse(sys.argv[2])
+    elif cmd == "marcar_naoclass":
+        marcar_naoclass()
+    elif cmd == "remover_agente":
+        remover_agente(sys.argv[2])
     elif cmd == "roteia":
         print(classifica_texto(" ".join(sys.argv[2:])))
     else:
